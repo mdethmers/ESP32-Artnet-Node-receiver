@@ -42,17 +42,42 @@ void displayfunction(void *param){
 
 // Function to handle the root page of the web server
 void handleRoot() {
-  String content = "<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">";
+  String content = "<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">";  
   content += "<link rel=\"icon\" href=\"data:,\">"; // Empty favicon
-  content += "<style>html { font-family: Helvetica; display: inline-block; margin: 0px auto; text-align: center;}";
-  content += ".button { background-color: #4CAF50; border: none; color: white; padding: 16px 40px; text-decoration: none; font-size: 30px; margin: 2px; cursor: pointer;}";
-  content += ".button2 { background-color: #555555; }</style></head>";
-  content += "<body><h1>" + nodename + " Configuration</h1><form method='POST' action='/config'>";
-  content += "Number of LEDs per output: <input type='text' name='numledsoutput' value='" + String(numledsoutput) + "'><br>";
-  content += "Number of outputs: <input type='text' name='numoutput' value='" + String(numoutput) + "'><br>";
-  content += "Start universe: <input type='text' name='startuniverse' value='" + String(startuniverse) + "'><br>";
-  content += "Artnet Node name: <input type='text' name='nodename' value='" + nodename + "'><br>";
-  content += "<input type='submit' value='Save'></form></body></html>";
+  content += "<style>";
+  content += "body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f4f4f4; color: #333; text-align: center; }";
+  content += "h1 { font-size: 24px; margin-bottom: 20px; }";
+  content += "form { background-color: #fff; padding: 20px; padding-right: 40px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1); max-width: 400px; margin: auto; }";
+  content += "input[type='text'] { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ccc; border-radius: 4px; font-size: 16px; }";
+  content += "input[type='submit'] { background-color: #4CAF50; color: white; border: none; padding: 12px; font-size: 16px; cursor: pointer; border-radius: 4px; width: 100%; }";
+  content += "input[type='submit']:hover { background-color: #45a049; }";
+  content += ".warning { margin-top: 20px; color: #d9534f; font-size: 14px; }"; // Warning text style
+  content += "</style></head>";
+  
+  content += "<body><h1>" + nodename + " Configuration</h1>";
+  content += "<form method='POST' action='/config'>";
+  content += "<label for='numledsoutput'>Number of LEDs per output (Max. 680):</label>";
+  content += "<input type='text' id='numledsoutput' name='numledsoutput' value='" + String(numledsoutput) + "'><br>";
+  
+  content += "<label for='numoutput'>Number of outputs (Max. 4):</label>";
+  content += "<input type='text' id='numoutput' name='numoutput' value='" + String(numoutput) + "'><br>";
+  
+  content += "<label for='startuniverse'>Start universe:</label>";
+  content += "<input type='text' id='startuniverse' name='startuniverse' value='" + String(startuniverse) + "'><br>";
+  
+  content += "<label for='nodename'>Artnet Node name:</label>";
+  content += "<input type='text' id='nodename' name='nodename' value='" + nodename + "'><br>";
+  
+  content += "<input type='submit' value='Save'>";
+  content += "</form>";
+
+  // Warning section
+  content += "<div class='warning'>";
+  content += "<p><strong>Warning:</strong> Please ensure that the settings on the node (number of pixels/universes) are the same as in your software to prevent errors.</p>";
+  content += "</div>";
+  
+  content += "</body></html>";
+  
   server.send(200, "text/html", content); // Send HTML response
 }
 
