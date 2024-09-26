@@ -1,5 +1,8 @@
 # ESP32-W5500-Artnet-receiver
 
+![Image Description](https://github.com/mdethmers/ESP32-W5500-Artnet-receiver/blob/main/Img/Schermafbeelding%202024-09-26%20162838.png)
+
+
 This project allows you to control multiple LED strips using the Artnet protocol via an ESP32 microcontroller with a W5500 Ethernet module. The code includes a simple web server for configuration and control of the LED strips.
 
 ## Features
