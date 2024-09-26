@@ -5,7 +5,7 @@
 
 // Define configuration constants
 #define NUM_LEDS_PER_STRIP 680 // Maximum number of LEDs per strip
-#define NUMSTRIPS 3 // Number of LED strips
+#define NUMSTRIPS 4 // Number of LED strips
 #define NB_CHANNEL_PER_LED 3  // Number of channels per LED (3 for RGB, 4 for RGBW)
 #define UNIVERSE_SIZE_IN_CHANNEL 510  // Size of a universe (170 pixels * 3 channels)
 #define COLOR_GRB // Define color order (Green-Red-Blue)
@@ -22,10 +22,10 @@ WebServer server(80);
 Preferences preferences; // Object to handle non-volatile storage
 
 // Default configuration values
-int numledsperoutput = 680; // Default number of LEDs per output
+int numledsoutput = 680; // Default number of LEDs per output
 int numoutput = 3; // Default number of outputs (LED strips)
 int startuniverse = 0; // Default starting universe ID
-int pins[NUMSTRIPS] = { 2, 15, 0}; // GPIO pins connected to each LED strip
+int pins[NUMSTRIPS] = { 2, 15, 0, 17}; // GPIO pins connected to each LED strip
 String nodename = "Arnet Node esp32"; // Default node name
 
 // Create instances of Artnet and LED driver
@@ -47,8 +47,8 @@ void handleRoot() {
   content += "<style>html { font-family: Helvetica; display: inline-block; margin: 0px auto; text-align: center;}";
   content += ".button { background-color: #4CAF50; border: none; color: white; padding: 16px 40px; text-decoration: none; font-size: 30px; margin: 2px; cursor: pointer;}";
   content += ".button2 { background-color: #555555; }</style></head>";
-  content += "<body><h1>"+ nodename +" Configuration</h1><form method='get' action='/config'>";
-  content += "Number of LEDs per output: <input type='text' name='numledsperoutput' value='" + String(numledsperoutput) + "'><br>";
+  content += "<body><h1>" + nodename + " Configuration</h1><form method='POST' action='/config'>";
+  content += "Number of LEDs per output: <input type='text' name='numledsoutput' value='" + String(numledsoutput) + "'><br>";
   content += "Number of outputs: <input type='text' name='numoutput' value='" + String(numoutput) + "'><br>";
   content += "Start universe: <input type='text' name='startuniverse' value='" + String(startuniverse) + "'><br>";
   content += "Artnet Node name: <input type='text' name='nodename' value='" + nodename + "'><br>";
@@ -58,30 +58,37 @@ void handleRoot() {
 
 // Function to handle the configuration updates
 void handleConfig() {
-  if (server.args() > 0) {
-    // Process each argument from the HTTP GET request
-    for (uint8_t i = 0; i < server.args(); i++) {
-      if (server.argName(i) == "numledsperoutput") {
-        numledsperoutput = server.arg(i).toInt(); // Update number of LEDs per output
-      } else if (server.argName(i) == "numoutput") {
-        numoutput = server.arg(i).toInt(); // Update number of outputs
-      } else if (server.argName(i) == "startuniverse") {
-        startuniverse = server.arg(i).toInt(); // Update starting universe ID
-      } else if (server.argName(i) == "nodename") {
-        nodename = server.arg(i); // Update node name
-      }
+  if (server.method() == HTTP_POST) {
+    // Retrieve the values from POST request
+    if (server.hasArg("numledsoutput")) {
+      numledsoutput = server.arg("numledsoutput").toInt();
+    }
+    if (server.hasArg("numoutput")) {
+      numoutput = server.arg("numoutput").toInt();
+    }
+    if (server.hasArg("startuniverse")) {
+      startuniverse = server.arg("startuniverse").toInt();
+    }
+    if (server.hasArg("nodename")) {
+      nodename = server.arg("nodename");
     }
     
     // Save updated configuration to non-volatile storage
     preferences.begin("esp32config", false);
-    preferences.putInt("numledsperoutput", numledsperoutput);
+    preferences.putInt("numledsoutput", numledsoutput);
     preferences.putInt("numoutput", numoutput);
     preferences.putInt("startuniverse", startuniverse);
     preferences.putString("nodename", nodename);
     preferences.end();
-  }
+
+    // Send a redirection response to the root page (or a clean page)
+    server.sendHeader("Location", "/", true); // Redirect to root
+    server.send(302, "text/plain", ""); // HTTP 302 redirect
+    } else {
+      server.send(405, "text/plain", "Method Not Allowed");
+    }
   
-  handleRoot(); // Show the updated root page
+  ESP.restart();
 }
 
 void setup() {
@@ -89,7 +96,7 @@ void setup() {
 
   // Initialize Preferences to load saved configuration
   preferences.begin("esp32config", true);
-  numledsperoutput = preferences.getInt("numledsperoutput", numledsperoutput);
+  numledsoutput = preferences.getInt("numledsoutput", numledsoutput);
   numoutput = preferences.getInt("numoutput", numoutput);
   startuniverse = preferences.getInt("startuniverse", startuniverse);
   nodename = preferences.getString("nodename", nodename);
@@ -107,7 +114,7 @@ void setup() {
   ETH.begin(MISO_GPIO, MOSI_GPIO, SCK_GPIO, CS_GPIO, INT_GPIO, SPI_CLOCK_MHZ, ETH_SPI_HOST); // Start Ethernet interface
 
   // Setup Artnet with the specified configuration
-  artnet.addSubArtnet(startuniverse, numledsperoutput * numoutput * NB_CHANNEL_PER_LED, UNIVERSE_SIZE_IN_CHANNEL, &displayfunction);
+  artnet.addSubArtnet(startuniverse, numledsoutput * numoutput * NB_CHANNEL_PER_LED, UNIVERSE_SIZE_IN_CHANNEL, &displayfunction);
   artnet.setNodeName(nodename); // Set Artnet node name
 
   ESP32_W5500_waitForConnect(); // Wait for DHCP IP assignment
@@ -119,7 +126,7 @@ void setup() {
 
   // Initialize Web Server routes
   server.on("/", HTTP_GET, handleRoot);
-  server.on("/config", HTTP_GET, handleConfig);
+  server.on("/config", HTTP_POST, handleConfig);
   server.begin(); // Start the web server
 
   Serial.println("HTTP server started"); // Indicate server start
