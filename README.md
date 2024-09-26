@@ -12,6 +12,11 @@ This project allows you to control multiple LED strips using the Artnet protocol
 - **Non-Volatile Storage**: Save and load configuration settings using the Preferences library.
 - **Ethernet Connectivity**: Use the W5500 Ethernet module for network communication.
 
+## PCB Design
+This is the ongoing PCB design, using 12v-to-5v stepdown converters, Polyfuses for protection and screwterminals for easy connections. 
+Project: https://oshwlab.com/matthijsdethmers/artnetnode-esp32
+EasyEDA Editor: https://easyeda.com/editor#project_id=86fd5b1121594bfa85fd2c5eed017e20
+
 ## Hardware Requirements
 
 - ESP32-Wroom-Dev1 microcontroller 
