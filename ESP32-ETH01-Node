@@ -5,7 +5,7 @@
 
 // Define configuration constants
 #define NUM_LEDS_PER_STRIP 680 // Maximum number of LEDs per strip
-#define NUMSTRIPS 4 // Number of LED strips
+#define NUMSTRIPS 8 // Number of LED strips
 #define NB_CHANNEL_PER_LED 3  // Number of channels per LED (3 for RGB, 4 for RGBW)
 #define UNIVERSE_SIZE_IN_CHANNEL 510  // Size of a universe (170 pixels * 3 channels)
 #define COLOR_GRB // Define color order (Green-Red-Blue)
@@ -17,26 +17,24 @@
 #include "Arduino.h"
 #include "artnetESP32V2.h" // Artnet library for ESP32
 
-// Create a web server object listening on port 80
 WebServer server(80);
-Preferences preferences; // Object to handle non-volatile storage
+Preferences preferences;
 
-// Default configuration values
-int numledsoutput = 680; // Default number of LEDs per output
-int numoutput = 3; // Default number of outputs (LED strips)
-int startuniverse = 0; // Default starting universe ID
-int pins[NUMSTRIPS] = { 15, 2, 0, 16}; // GPIO pins connected to each LED strip
-String nodename = "Artnet Node ESP32"; // Default node name
+int numledsoutput = 680;
+int numoutput = 3;
+int startuniverse = 0;
+int pins[NUMSTRIPS] = {15, 2, 0, 16};
+String nodename = "Artnet Node ESP32";
+String ssid = "";
+String password = "";
+bool useWiFi = false;
+bool isAPMode = false;
 
-// Create instances of Artnet and LED driver
 artnetESP32V2 artnet = artnetESP32V2();
 I2SClocklessLedDriver driver;
 
-// Function to display LED data
-void displayfunction(void *param){
-    // Cast the parameter to the subArtnet structure
+void displayfunction(void *param) {
     subArtnet *subartnet = (subArtnet *)param;
-    // Update LEDs with the received data
     driver.showPixels(NO_WAIT, subartnet->data);
 }
 
@@ -67,6 +65,15 @@ void handleRoot() {
   
   content += "<label for='nodename'>Artnet Node name:</label>";
   content += "<input type='text' id='nodename' name='nodename' value='" + nodename + "'><br>";
+
+  content += "<label for='useWiFi'>Use Wi-Fi:</label>";
+  content += "<input type='checkbox' id='useWiFi' name='useWiFi' " + String(useWiFi ? "checked" : "") + "><br>";
+
+  content += "<label for='ssid'>SSID:</label>";
+  content += "<input type='text' id='ssid' name='ssid' value='" + ssid + "'><br>";
+
+  content += "<label for='password'>Password:</label>";
+  content += "<input type='text' id='password' name='password' value='" + password + "'><br>";
   
   content += "<input type='submit' value='Save'>";
   content += "</form>";
@@ -81,82 +88,136 @@ void handleRoot() {
   server.send(200, "text/html", content); // Send HTML response
 }
 
-// Function to handle the configuration updates
 void handleConfig() {
-  if (server.method() == HTTP_POST) {
-    // Retrieve the values from POST request
-    if (server.hasArg("numledsoutput")) {
-      numledsoutput = server.arg("numledsoutput").toInt();
-    }
-    if (server.hasArg("numoutput")) {
-      numoutput = server.arg("numoutput").toInt();
-    }
-    if (server.hasArg("startuniverse")) {
-      startuniverse = server.arg("startuniverse").toInt();
-    }
-    if (server.hasArg("nodename")) {
-      nodename = server.arg("nodename");
-    }
-    
-    // Save updated configuration to non-volatile storage
-    preferences.begin("esp32config", false);
-    preferences.putInt("numledsoutput", numledsoutput);
-    preferences.putInt("numoutput", numoutput);
-    preferences.putInt("startuniverse", startuniverse);
-    preferences.putString("nodename", nodename);
-    preferences.end();
+    if (server.method() == HTTP_POST) {
+        if (server.hasArg("numledsoutput")) numledsoutput = server.arg("numledsoutput").toInt();
+        if (server.hasArg("numoutput")) numoutput = server.arg("numoutput").toInt();
+        if (server.hasArg("startuniverse")) startuniverse = server.arg("startuniverse").toInt();
+        if (server.hasArg("nodename")) nodename = server.arg("nodename");
+        if (server.hasArg("ssid")) ssid = server.arg("ssid");
+        if (server.hasArg("password")) password = server.arg("password");
+        if (server.hasArg("useWiFi")) useWiFi = server.arg("useWiFi");
 
-    // Send a redirection response to the root page (or a clean page)
-    server.sendHeader("Location", "/", true); // Redirect to root
-    server.send(302, "text/plain", ""); // HTTP 302 redirect
-    } else {
-      server.send(405, "text/plain", "Method Not Allowed");
+
+        preferences.begin("esp32config", false);
+        preferences.putInt("numledsoutput", numledsoutput);
+        preferences.putInt("numoutput", numoutput);
+        preferences.putInt("startuniverse", startuniverse);
+        preferences.putString("nodename", nodename);
+        preferences.putString("ssid", ssid);
+        preferences.putString("password", password);
+        preferences.putBool("useWiFi", useWiFi);
+        preferences.end();
+
+        server.sendHeader("Location", "/", true);
+        server.send(302, "text/plain", "");
+        ESP.restart();
     }
-  
-  ESP.restart();
+}
+
+void setupWiFi() {
+    WiFi.begin(ssid.c_str(), password.c_str());
+    unsigned long startAttemptTime = millis();
+
+    while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 30000) {
+        delay(1000);
+        Serial.println("Connecting to Wi-Fi...");
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.print("Wi-Fi connected. IP: ");
+        Serial.println(WiFi.localIP());
+
+        server.on("/", HTTP_GET, handleRoot);
+        server.on("/config", HTTP_POST, handleConfig);
+        server.begin();
+        Serial.println("HTTP server started (Wi-Fi).");
+    } else {
+        Serial.println("Wi-Fi connection failed, starting AP mode.");
+        startAPMode();
+    }
+}
+
+void setupEthernet() {
+    WT32_ETH01_onEvent();
+    ETH.begin();
+    unsigned long startAttemptTime = millis();
+
+    while (!ETH.linkUp() && millis() - startAttemptTime < 30000) {
+        delay(1000);
+        Serial.println("Connecting to Ethernet...");
+    }
+
+    if (ETH.linkUp()) {
+        Serial.print("Ethernet connected. IP: ");
+        Serial.println(ETH.localIP());
+
+        server.on("/", HTTP_GET, handleRoot);
+        server.on("/config", HTTP_POST, handleConfig);
+        server.begin();
+        Serial.println("HTTP server started (Ethernet).");
+    } else {
+        Serial.println("Ethernet connection failed, starting AP mode.");
+        startAPMode();
+    }
+}
+
+void startAPMode() {
+    isAPMode = true;
+    WiFi.softAP(nodename.c_str());
+    IPAddress IP = WiFi.softAPIP();
+    Serial.print("AP Mode started. Connect to Wi-Fi SSID: ");
+    Serial.println(nodename);
+    Serial.print("Access Point IP: ");
+    Serial.println(IP);
+
+    server.on("/", HTTP_GET, handleRoot);
+    server.on("/config", HTTP_POST, handleConfig);
+    server.begin();
+    Serial.println("HTTP server started (AP mode).");
 }
 
 void setup() {
-  Serial.begin(115200); // Start serial communication
+    Serial.begin(115200);
 
-  // Initialize Preferences to load saved configuration
-  preferences.begin("esp32config", true);
-  numledsoutput = preferences.getInt("numledsoutput", numledsoutput);
-  numoutput = preferences.getInt("numoutput", numoutput);
-  startuniverse = preferences.getInt("startuniverse", startuniverse);
-  nodename = preferences.getString("nodename", nodename);
-  preferences.end();
+    preferences.begin("esp32config", true);
+    numledsoutput = preferences.getInt("numledsoutput", numledsoutput);
+    numoutput = preferences.getInt("numoutput", numoutput);
+    startuniverse = preferences.getInt("startuniverse", startuniverse);
+    nodename = preferences.getString("nodename", nodename);
+    ssid = preferences.getString("ssid", ssid);
+    password = preferences.getString("password", password);
+    useWiFi = preferences.getBool("useWiFi", useWiFi);
+    preferences.end();
 
-  // Wait for Serial to be available (for debugging)
-  while (!Serial && (millis() < 5000));
+    driver.initled(NULL, pins, NUMSTRIPS, NUM_LEDS_PER_STRIP);
+    driver.setBrightness(20);
 
-  // Initialize LED driver
-  driver.initled(NULL, pins, NUMSTRIPS, NUM_LEDS_PER_STRIP);
-  driver.setBrightness(20); // Set LED brightness
+    if (useWiFi) {
+        setupWiFi();
+    } else {
+        setupEthernet();
+    }
 
-  // Initialize Ethernet
-  WT32_ETH01_onEvent(); // Handle Ethernet events
-  ETH.begin(); // Start Ethernet interface
+    if (!isAPMode) {
+        IPAddress activeIP = useWiFi ? WiFi.localIP() : ETH.localIP();
+        artnet.addSubArtnet(startuniverse, numledsoutput * numoutput * NB_CHANNEL_PER_LED, UNIVERSE_SIZE_IN_CHANNEL, &displayfunction);
+        artnet.setNodeName(nodename);
 
-  // Setup Artnet with the specified configuration
-  artnet.addSubArtnet(startuniverse, numledsoutput * numoutput * NB_CHANNEL_PER_LED, UNIVERSE_SIZE_IN_CHANNEL, &displayfunction);
-  artnet.setNodeName(nodename); // Set Artnet node name
-
-  WT32_ETH01_waitForConnect(); // Wait for DHCP IP assignment
-
-  if (artnet.listen(ETH.localIP(), 6454)) {
-    Serial.print("Artnet Listening on IP: ");
-    Serial.println(ETH.localIP()); // Print assigned IP address
-  }
-
-  // Initialize Web Server routes
-  server.on("/", HTTP_GET, handleRoot);
-  server.on("/config", HTTP_POST, handleConfig);
-  server.begin(); // Start the web server
-
-  Serial.println("HTTP server started"); // Indicate server start
+        if (artnet.listen(activeIP, 6454)) {
+            Serial.print("Artnet Listening on IP: ");
+            Serial.println(activeIP);
+        }
+    }
 }
 
 void loop() {
-  server.handleClient(); // Handle incoming HTTP requests
+    server.handleClient();
+    if (!isAPMode && useWiFi && WiFi.status() != WL_CONNECTED) {
+        Serial.println("Wi-Fi disconnected, restarting AP mode...");
+        startAPMode();
+    } else if (!isAPMode && !useWiFi && !ETH.linkUp()) {
+        Serial.println("Ethernet disconnected, restarting AP mode...");
+        startAPMode();
+    }
 }
