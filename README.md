@@ -41,11 +41,11 @@ EasyEDA Editor: https://easyeda.com/editor#project_id=86fd5b1121594bfa85fd2c5eed
 
 ## Configure the LED Controller:
 - Use the web interface to set the following parameters:
--- Number of LEDs per output: The maximum number of LEDs per strip.
--- Number of outputs: The number of LED strips.
--- Start universe: The Artnet universe ID to start with.
--- Artnet Node name: The name of the Artnet node.
--- Click Save to apply the changes. The settings will be stored and used by the ESP32.
+- Number of LEDs per output: The maximum number of LEDs per strip.
+- Number of outputs: The number of LED strips.
+- Start universe: The Artnet universe ID to start with.
+- Artnet Node name: The name of the Artnet node.
+- Click Save to apply the changes. The settings will be stored and used by the ESP32.
 
 ## Code Overview
 - displayfunction(void *param): Function to update the LED strips with data received from Artnet.
