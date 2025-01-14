@@ -10,7 +10,7 @@ This project allows you to control multiple LED strips using the Artnet protocol
 - **Artnet Protocol**: Communicate with your LED strips using the Artnet protocol.
 - **Web Interface**: Configure the number of LEDs, outputs, start universe, and node name via a web interface.
 - **Non-Volatile Storage**: Save and load configuration settings using the Preferences library.
-- **Ethernet Connectivity**: Use the W5500 Ethernet module for network communication.
+- **Ethernet Connectivity**: Use the W5500 or ETH01 Ethernet module for network communication.
 
 ## PCB Design
 This is the ongoing PCB design, using 12v-to-5v stepdown converters, Polyfuses for protection and screwterminals for easy connections. 
@@ -28,6 +28,7 @@ EasyEDA Editor: https://easyeda.com/editor#project_id=86fd5b1121594bfa85fd2c5eed
 ## Software Requirements
 
 - Arduino IDE with ESP32 support
+- Arduino ESP32 JSON library Version 2.0.17 (newer versions result in compilation errors)
 - Libraries:
   - **Preferences** https://www.arduino.cc/reference/en/libraries/preferences/
   - **WebServer_ESP32_W5500** https://github.com/khoih-prog/WebServer_ESP32_W5500
