@@ -28,7 +28,9 @@ EasyEDA Editor: https://easyeda.com/editor#project_id=86fd5b1121594bfa85fd2c5eed
 ## Software Requirements
 
 - Arduino IDE with ESP32 support
-- Arduino ESP32 JSON library Version 2.0.17 (newer versions result in compilation errors)
+- Espressif ESP32 board manager library
+  - Use https://espressif.github.io/arduino-esp32/package_esp32_index.json
+  - Version 2.0.17 or lower, otherwise compilation errors arise
 - Libraries:
   - **Preferences** https://www.arduino.cc/reference/en/libraries/preferences/
   - **WebServer_ESP32_W5500** https://github.com/khoih-prog/WebServer_ESP32_W5500
