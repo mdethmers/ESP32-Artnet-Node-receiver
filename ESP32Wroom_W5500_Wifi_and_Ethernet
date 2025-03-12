@@ -5,7 +5,7 @@
 
 // Define configuration constants
 #define NUM_LEDS_PER_STRIP 680 // Maximum number of LEDs per strip
-#define NUMSTRIPS 8 // Number of LED strips
+#define NUMSTRIPS 4 // Number of LED strips
 #define NB_CHANNEL_PER_LED 3  // Number of channels per LED (3 for RGB, 4 for RGBW)
 #define UNIVERSE_SIZE_IN_CHANNEL 510  // Size of a universe (170 pixels * 3 channels)
 #define COLOR_GRB // Define color order (Green-Red-Blue)
@@ -18,14 +18,39 @@
 #include "I2SClocklessLedDriver.h" // Library to drive LEDs via I2S
 #include "Arduino.h"
 #include "artnetESP32V2.h" // Artnet library for ESP32
+#include <Adafruit_NeoPixel.h>
 
+#include <SPI.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+//OLED definitions
+#define SCREEN_WIDTH 128 // OLED display width, in pixels
+#define SCREEN_HEIGHT 32 // OLED display height, in pixels
+#define OLED_RESET     4 // Reset pin # (or -1 if sharing Arduino reset pin)
+#define SCREEN_ADDRESS 0x3C ///< See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+//Status LED settings
+#define STATUS_LED_PIN 16  // WS2812 LED pin
+Adafruit_NeoPixel StatusLed(1, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
+
+//Timeout settings
+unsigned long startAttemptTime = millis();
+const unsigned long connectionTimeout = 30000; // 30 seconds timeout
+bool ledState = false;  // Variable to track LED state
+
+//Server definitions
 WebServer server(80);
 Preferences preferences;
-
+ 
+//Default Artnet receiver settings
 int numledsoutput = 680;
 int numoutput = 3;
 int startuniverse = 0;
 int pins[NUMSTRIPS] = {12,14,27,26};
+
 String nodename = "Artnet Node ESP32";
 String ssid = "";
 String password = "";
@@ -53,38 +78,28 @@ void handleRoot() {
   content += "input[type='submit']:hover { background-color: #45a049; }";
   content += ".warning { margin-top: 20px; color: #d9534f; font-size: 14px; }"; // Warning text style
   content += "</style></head>";
-  
   content += "<body><h1>" + nodename + " Configuration</h1>";
   content += "<form method='POST' action='/config'>";
   content += "<label for='numledsoutput'>Number of LEDs per output (Max. 680):</label>";
   content += "<input type='text' id='numledsoutput' name='numledsoutput' value='" + String(numledsoutput) + "'><br>";
-  
   content += "<label for='numoutput'>Number of outputs (Max. 4):</label>";
   content += "<input type='text' id='numoutput' name='numoutput' value='" + String(numoutput) + "'><br>";
-  
   content += "<label for='startuniverse'>Start universe:</label>";
   content += "<input type='text' id='startuniverse' name='startuniverse' value='" + String(startuniverse) + "'><br>";
-  
   content += "<label for='nodename'>Artnet Node name:</label>";
   content += "<input type='text' id='nodename' name='nodename' value='" + nodename + "'><br>";
-
   content += "<label for='useWiFi'>Use Wi-Fi:</label>";
   content += "<input type='checkbox' id='useWiFi' name='useWiFi' " + String(useWiFi ? "checked" : "") + "><br>";
-
   content += "<label for='ssid'>SSID:</label>";
   content += "<input type='text' id='ssid' name='ssid' value='" + ssid + "'><br>";
-
   content += "<label for='password'>Password:</label>";
   content += "<input type='text' id='password' name='password' value='" + password + "'><br>";
-  
   content += "<input type='submit' value='Save'>";
   content += "</form>";
-
   // Warning section
   content += "<div class='warning'>";
   content += "<p><strong>Warning:</strong> Please ensure that the settings on the node (number of pixels/universes) are the same as in your software to prevent errors.</p>";
   content += "</div>";
-  
   content += "</body></html>";
   
   server.send(200, "text/html", content); // Send HTML response
@@ -100,7 +115,6 @@ void handleConfig() {
         if (server.hasArg("password")) password = server.arg("password");
         useWiFi = server.hasArg("useWiFi");
 
-
         preferences.begin("esp32config", false);
         preferences.putInt("numledsoutput", numledsoutput);
         preferences.putInt("numoutput", numoutput);
@@ -113,17 +127,42 @@ void handleConfig() {
 
         server.sendHeader("Location", "/", true);
         server.send(302, "text/plain", "");
+
         ESP.restart();
     }
 }
 
 void setupWiFi() {
     WiFi.begin(ssid.c_str(), password.c_str());
-    unsigned long startAttemptTime = millis();
 
-    while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 30000) {
+    display.clearDisplay();
+    display.setCursor(0,0);
+    display.println(F("Connecting to Wi-Fi..."));
+    display.display();
+
+    while (millis() - startAttemptTime < connectionTimeout) {
+        int remainingTime = (connectionTimeout - (millis() - startAttemptTime)) / 1000;
+
+        ledState = !ledState;
+        setStatusLED(0, 0, 0);
+        if (ledState) {
+            setStatusLED(255, 0, 0);  // Turn LED ON
+        }
+
+        display.clearDisplay();
+        display.setCursor(0,0);
+        display.println(F("Connecting to Wi-Fi..."));
+        display.setCursor(0,9);
+        display.print(F("Timeout in: "));
+        display.print(remainingTime);
+        display.print(F("s"));
+        display.display();
+
+        Serial.print("Connecting to Wi-Fi... ");
+        Serial.print(remainingTime);
+        Serial.println("s remaining");
+
         delay(1000);
-        Serial.println("Connecting to Wi-Fi...");
     }
 
     if (WiFi.status() == WL_CONNECTED) {
@@ -134,6 +173,16 @@ void setupWiFi() {
         server.on("/config", HTTP_POST, handleConfig);
         server.begin();
         Serial.println("HTTP server started (Wi-Fi).");
+
+        display.clearDisplay();
+        display.setCursor(0,0);
+        display.println(F("Wi-Fi connected"));
+        display.setCursor(0,9);
+        display.print(ssid);
+        display.display();
+
+        setStatusLED(0, 255, 0);
+
     } else {
         Serial.println("Wi-Fi connection failed, starting AP mode.");
         startAPMode();
@@ -142,13 +191,18 @@ void setupWiFi() {
 
 void setupEthernet() {
     Serial.println("Initializing Ethernet...");
+
+    display.clearDisplay();
+    display.setCursor(0,0);
+    display.println(F("Initializing Ethernet"));
+    display.display();
+
     ESP32_W5500_onEvent();
     ETH.begin(MISO_GPIO, MOSI_GPIO, SCK_GPIO, CS_GPIO, INT_GPIO, SPI_CLOCK_MHZ, ETH_SPI_HOST);
 
-    unsigned long startAttemptTime = millis();
-    const unsigned long connectionTimeout = 30000; // 30 seconds timeout
-
     while (millis() - startAttemptTime < connectionTimeout) {
+        int remainingTime = (connectionTimeout - (millis() - startAttemptTime)) / 1000;
+
         // Check if we have a valid IP
         if (ETH.localIP() != INADDR_NONE) {
             Serial.println("Ethernet connected successfully.");
@@ -160,17 +214,48 @@ void setupEthernet() {
             server.on("/config", HTTP_POST, handleConfig);
             server.begin();
             Serial.println("HTTP server started (Ethernet).");
+
+            display.clearDisplay();
+            display.setCursor(0,0);
+            display.print(F("Ethernet connected"));
+            display.setCursor(0,9);
+            display.print(nodename);
+            display.display();
+
+            setStatusLED(0, 255, 0);
+
             return;
         }
 
-        delay(1000); // Retry every second
-        Serial.println("Waiting for Ethernet connection...");
+        // Update LED
+        ledState = !ledState;
+        setStatusLED(0, 0, 0);
+        if (ledState) {
+            setStatusLED(255, 0, 0);  // Turn LED ON
+        }
+
+        // Update display with countdown timer
+        display.clearDisplay();
+        display.setCursor(0,0);
+        display.println(F("Initializing Ethernet"));
+        display.setCursor(0,9);
+        display.print(F("Timeout in: "));
+        display.print(remainingTime);
+        display.print(F("s"));
+        display.display();
+
+        Serial.print("Waiting for Ethernet connection... ");
+        Serial.print(remainingTime);
+        Serial.println("s remaining");
+
+        delay(1000);
     }
 
     // If Ethernet connection fails
     Serial.println("Ethernet connection failed. Starting AP mode...");
     startAPMode();
 }
+
 
 void startAPMode() {
     isAPMode = true;
@@ -185,10 +270,43 @@ void startAPMode() {
     server.on("/config", HTTP_POST, handleConfig);
     server.begin();
     Serial.println("HTTP server started (AP mode).");
+
+    setStatusLED(0, 0, 255);
+
+    display.clearDisplay();
+    display.setCursor(0,0);
+    display.print("AP Mode");
+    display.setCursor(0,9);
+    display.print(nodename);
+    display.setCursor(0,18);
+    display.print("IP:");
+    display.print(IP);
+    display.display();
+}
+
+// Function to set LED color
+void setStatusLED(uint8_t r, uint8_t g, uint8_t b) {
+    StatusLed.setPixelColor(0, StatusLed.Color(r/2, g/2, b/2));  // Set first LED
+    StatusLed.show();  // Send data to LED
 }
 
 void setup() {
     Serial.begin(115200);
+   
+    StatusLed.begin();    // Initialize NeoPixel
+    StatusLed.show();     // Ensure all LEDs are off at startup
+    setStatusLED(255, 255, 0);  // Example: Set LED to Red
+
+    if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+      Serial.println(F("SSD1306 allocation failed"));
+    }
+
+    display.clearDisplay();
+    display.setTextSize(1);             // Normal 1:1 pixel scale
+    display.setTextColor(SSD1306_WHITE);// Draw white text
+    display.setCursor(0,0);             // Start at top-left corner
+    display.println(F("Initializing..."));
+    display.display();
 
     preferences.begin("esp32config", true);
     numledsoutput = preferences.getInt("numledsoutput", numledsoutput);
@@ -201,7 +319,7 @@ void setup() {
     preferences.end();
 
     driver.initled(NULL, pins, NUMSTRIPS, NUM_LEDS_PER_STRIP);
-    driver.setBrightness(20);
+    driver.setBrightness(100);
 
     if (useWiFi) {
         setupWiFi();
@@ -211,6 +329,17 @@ void setup() {
 
     if (!isAPMode) {
         IPAddress activeIP = useWiFi ? WiFi.localIP() : ETH.localIP();
+
+        display.setCursor(0,17);
+        display.print(F("ip:"));
+        display.print(activeIP);
+        display.setCursor(0,25);
+        display.print(F("leds:"));
+        display.print(numledsoutput);
+        display.print(F(" outputs:"));
+        display.print(numoutput);
+        display.display();
+
         artnet.addSubArtnet(startuniverse, numledsoutput * numoutput * NB_CHANNEL_PER_LED, UNIVERSE_SIZE_IN_CHANNEL, &displayfunction);
         artnet.setNodeName(nodename);
 
