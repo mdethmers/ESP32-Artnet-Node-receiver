@@ -41,6 +41,17 @@ unsigned long startAttemptTime = millis();
 const unsigned long connectionTimeout = 30000; // 30 seconds timeout
 bool ledState = false;  // Variable to track LED state
 
+//testcycle settings
+uint8_t currentColor = 0;  // 0 = Red, 1 = Green, 2 = Blue
+unsigned long lastUpdate = 0;
+const unsigned long cycleDelay = 1000;  // Change color every 1 second
+bool isCycleRunning = false;  // Add this flag to track if the cycle is running
+Adafruit_NeoPixel strip1(NUM_LEDS_PER_STRIP, 12, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel strip2(NUM_LEDS_PER_STRIP, 14, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel strip3(NUM_LEDS_PER_STRIP, 26, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel strip4(NUM_LEDS_PER_STRIP, 27, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel* strips[4] = { &strip1, &strip2, &strip3, &strip4 };
+
 //Server definitions
 WebServer server(80);
 Preferences preferences;
@@ -56,6 +67,8 @@ String ssid = "";
 String password = "";
 bool useWiFi = false;
 bool isAPMode = false;
+bool ledCycleEnabled = false;
+
 
 artnetESP32V2 artnet = artnetESP32V2();
 I2SClocklessLedDriver driver;
@@ -88,6 +101,8 @@ void handleRoot() {
   content += "<input type='text' id='startuniverse' name='startuniverse' value='" + String(startuniverse) + "'><br>";
   content += "<label for='nodename'>Artnet Node name:</label>";
   content += "<input type='text' id='nodename' name='nodename' value='" + nodename + "'><br>";
+  content += "<label for='ledCycleEnabled'>Enable RGB Test Cycle:</label>";
+  content += "<input type='checkbox' id='ledCycleEnabled' name='ledCycleEnabled' " + String(ledCycleEnabled ? "checked" : "") + "><br>";
   content += "<label for='useWiFi'>Use Wi-Fi:</label>";
   content += "<input type='checkbox' id='useWiFi' name='useWiFi' " + String(useWiFi ? "checked" : "") + "><br>";
   content += "<label for='ssid'>SSID:</label>";
@@ -114,6 +129,7 @@ void handleConfig() {
         if (server.hasArg("ssid")) ssid = server.arg("ssid");
         if (server.hasArg("password")) password = server.arg("password");
         useWiFi = server.hasArg("useWiFi");
+        ledCycleEnabled = server.hasArg("ledCycleEnabled"); // Process new checkbox value
 
         preferences.begin("esp32config", false);
         preferences.putInt("numledsoutput", numledsoutput);
@@ -128,7 +144,9 @@ void handleConfig() {
         server.sendHeader("Location", "/", true);
         server.send(302, "text/plain", "");
 
-        ESP.restart();
+        if (!ledCycleEnabled){
+          ESP.restart();
+        }
     }
 }
 
@@ -284,6 +302,32 @@ void startAPMode() {
     display.display();
 }
 
+void cycleLEDs() {
+
+    if (millis() - lastUpdate >= cycleDelay) {
+        lastUpdate = millis();
+
+        // Determine color based on cycle
+        uint32_t color;
+        switch (currentColor) {
+            case 0: color = strips[0]->Color(255, 0, 0); break;  // Red
+            case 1: color = strips[0]->Color(0, 255, 0); break;  // Green
+            case 2: color = strips[0]->Color(0, 0, 255); break;  // Blue
+        }
+
+        // Apply color to all strips
+        for (int i = 0; i < NUMSTRIPS; i++) {
+            for (int j = 0; j < NUM_LEDS_PER_STRIP; j++) {
+                strips[i]->setPixelColor(j, color);
+            }
+            strips[i]->show();
+        }
+
+        // Move to the next color in cycle
+        currentColor = (currentColor + 1) % 3;
+    }
+}
+
 // Function to set LED color
 void setStatusLED(uint8_t r, uint8_t g, uint8_t b) {
     StatusLed.setPixelColor(0, StatusLed.Color(r/2, g/2, b/2));  // Set first LED
@@ -359,4 +403,18 @@ void loop() {
         Serial.println("Ethernet disconnected, restarting AP mode...");
         startAPMode();
     }
+
+        // Check if the test cycle should be enabled
+    if (ledCycleEnabled && !isCycleRunning) {
+        // If the cycle is enabled and it's not running, start the test pattern
+        Serial.println("Starting RGB test pattern.");
+        cycleLEDs();
+        isCycleRunning = true;  // Mark the cycle as running
+    }
+
+      // Run the LED cycle if it's enabled
+    if (ledCycleEnabled && isCycleRunning) {
+        cycleLEDs(); // Keep cycling the LEDs if enabled
+    }
+
 }
