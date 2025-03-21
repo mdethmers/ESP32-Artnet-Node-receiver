@@ -1,84 +1,464 @@
-// Define debugging and configuration settings
+/**
+ * ArtNet LED Controller for ESP32
+ * Controls multiple LED strips via ArtNet protocol over Ethernet or WiFi
+ * Provides web interface for configuration and supports static colors and test patterns
+ */
+
+// Feature configuration
 #define DEBUG_ETHERNET_WEBSERVER_PORT Serial
 #define _ETHERNET_WEBSERVER_LOGLEVEL_ 3
 #define UNIQUE_SUBARTNET
 
-// Define configuration constants
+// LED configuration
 #define NUM_LEDS_PER_STRIP 680 // Maximum number of LEDs per strip
-#define NUMSTRIPS 4 // Number of LED strips
+#define NUMSTRIPS 4           // Maximum number of LED strips
 #define NB_CHANNEL_PER_LED 3  // Number of channels per LED (3 for RGB, 4 for RGBW)
 #define UNIVERSE_SIZE_IN_CHANNEL 510  // Size of a universe (170 pixels * 3 channels)
-#define COLOR_GRB // Define color order (Green-Red-Blue)
+#define COLOR_RBG          // Define color order (Green-Red-Blue)
+
+// Hardware configuration
+#define STATUS_LED_PIN 16      // WS2812 LED pin for status indicator
+#define SCREEN_WIDTH 128       // OLED display width, in pixels
+#define SCREEN_HEIGHT 32       // OLED display height, in pixels
+#define OLED_RESET 4           // Reset pin # (or -1 if sharing Arduino reset pin)
+#define SCREEN_ADDRESS 0x3C    // See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
 
 // Include necessary libraries
 #include <Preferences.h>
-// #include <WebServer_WT32_ETH01.h>
 #include <WebServer_ESP32_W5500.h> 
 #include <WebServer.h>
-#include "I2SClocklessLedDriver.h" // Library to drive LEDs via I2S
+#include "I2SClocklessLedDriver.h"
 #include "Arduino.h"
-#include "artnetESP32V2.h" // Artnet library for ESP32
+#include "artnetESP32V2.h"
 #include <Adafruit_NeoPixel.h>
-
 #include <SPI.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
-//OLED definitions
-#define SCREEN_WIDTH 128 // OLED display width, in pixels
-#define SCREEN_HEIGHT 32 // OLED display height, in pixels
-#define OLED_RESET     4 // Reset pin # (or -1 if sharing Arduino reset pin)
-#define SCREEN_ADDRESS 0x3C ///< See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
+// Global objects
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
-
-//Status LED settings
-#define STATUS_LED_PIN 16  // WS2812 LED pin
 Adafruit_NeoPixel StatusLed(1, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
-
-//Timeout settings
-unsigned long startAttemptTime = millis();
-const unsigned long connectionTimeout = 30000; // 30 seconds timeout
-bool ledState = false;  // Variable to track LED state
-
-//testcycle settings
-uint8_t currentColor = 0;  // 0 = Red, 1 = Green, 2 = Blue
-unsigned long lastUpdate = 0;
-const unsigned long cycleDelay = 1000;  // Change color every 1 second
-bool isCycleRunning = false;  // Add this flag to track if the cycle is running
-Adafruit_NeoPixel strip1(NUM_LEDS_PER_STRIP, 12, NEO_GRB + NEO_KHZ800);
-Adafruit_NeoPixel strip2(NUM_LEDS_PER_STRIP, 14, NEO_GRB + NEO_KHZ800);
-Adafruit_NeoPixel strip3(NUM_LEDS_PER_STRIP, 26, NEO_GRB + NEO_KHZ800);
-Adafruit_NeoPixel strip4(NUM_LEDS_PER_STRIP, 27, NEO_GRB + NEO_KHZ800);
-Adafruit_NeoPixel* strips[4] = { &strip1, &strip2, &strip3, &strip4 };
-
-//Server definitions
 WebServer server(80);
 Preferences preferences;
- 
-//Default Artnet receiver settings
-int numledsoutput = 680;
-int numoutput = 3;
-int startuniverse = 0;
-int pins[NUMSTRIPS] = {12,14,27,26};
-
-String nodename = "Artnet Node ESP32";
-String ssid = "";
-String password = "";
-bool useWiFi = false;
-bool isAPMode = false;
-bool ledCycleEnabled = false;
-
-
 artnetESP32V2 artnet = artnetESP32V2();
 I2SClocklessLedDriver driver;
 
+// LED strip objects
+Adafruit_NeoPixel strip1(NUM_LEDS_PER_STRIP, 12, NEO_BRG + NEO_KHZ800);
+Adafruit_NeoPixel strip2(NUM_LEDS_PER_STRIP, 14, NEO_BRG + NEO_KHZ800);
+Adafruit_NeoPixel strip3(NUM_LEDS_PER_STRIP, 26, NEO_BRG + NEO_KHZ800);
+Adafruit_NeoPixel strip4(NUM_LEDS_PER_STRIP, 27, NEO_BRG + NEO_KHZ800);
+Adafruit_NeoPixel* strips[NUMSTRIPS] = { &strip1, &strip2, &strip3, &strip4 };
+
+// Default settings
+struct Settings {
+  int numLedsPerOutput = 680;
+  int numOutputs = 3;
+  int startUniverse = 0;
+  int pins[NUMSTRIPS] = {12, 14, 27, 26};
+  int ledBrightness = 255;
+  String nodeName = "Artnet Node ESP32";
+  String ssid = "";
+  String password = "";
+  bool useWiFi = false;
+  String staticColor = "#000000";
+  bool enStatColor = false;
+} settings;
+
+// Runtime state
+struct State {
+  bool isAPMode = false;
+  bool ledCycleEnabled = false;
+  bool isStaticColorSet = false;
+  uint8_t currentColor = 0;  // 0 = Red, 1 = Green, 2 = Blue
+  unsigned long lastUpdate = 0;
+  unsigned long startAttemptTime = 0;
+  bool ledState = false;
+} state;
+
+// Constants
+const unsigned long CONNECTION_TIMEOUT = 30000; // 30 seconds timeout
+const unsigned long CYCLE_DELAY = 1000;  // Change color every 1 second
+
+// Function prototypes
+void setupWiFi();
+void setupEthernet();
+void startAPMode();
+void cycleLEDs();
+void setStatusLED(uint8_t r, uint8_t g, uint8_t b);
+void applyStaticColor();
+void loadSettings();
+void saveSettings();
+void handleRoot();
+void handleConfig();
+
+// ArtNet callback function
 void displayfunction(void *param) {
-    subArtnet *subartnet = (subArtnet *)param;
-    driver.showPixels(NO_WAIT, subartnet->data);
+  subArtnet *subartnet = (subArtnet *)param;
+  driver.showPixels(NO_WAIT, subartnet->data);
 }
 
-// Function to handle the root page of the web server
+/**
+ * Main setup function
+ */
+void setup() {
+  Serial.begin(115200);
+  
+  // Initialize status LED
+  StatusLed.begin();
+  StatusLed.show();
+  setStatusLED(255, 255, 0);  // Yellow during initialization
+  
+  // Initialize OLED display
+  if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+    Serial.println(F("SSD1306 allocation failed"));
+  }
+  
+  // Show initial message
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0,0);
+  display.println(F("Initializing..."));
+  display.display();
+  
+  // Load settings from preferences
+  loadSettings();
+  
+  // Initialize LED driver
+  driver.initled(NULL, settings.pins, NUMSTRIPS, NUM_LEDS_PER_STRIP);
+  driver.setBrightness(settings.ledBrightness);
+  
+  // Initialize networking
+  state.startAttemptTime = millis();
+  if (settings.useWiFi) {
+    setupWiFi();
+  } else {
+    setupEthernet();
+  }
+  
+  // If not in AP mode, set up ArtNet
+  if (!state.isAPMode) {
+    IPAddress activeIP = settings.useWiFi ? WiFi.localIP() : ETH.localIP();
+    
+    // Update display with connection info
+    display.setCursor(0,17);
+    display.print(F("ip:"));
+    display.print(activeIP);
+    display.setCursor(0,25);
+    display.print(F("leds:"));
+    display.print(settings.numLedsPerOutput);
+    display.print(F(" outputs:"));
+    display.print(settings.numOutputs);
+    display.display();
+    
+    // Initialize ArtNet
+    artnet.addSubArtnet(
+      settings.startUniverse, 
+      settings.numLedsPerOutput * settings.numOutputs * NB_CHANNEL_PER_LED, 
+      UNIVERSE_SIZE_IN_CHANNEL, 
+      &displayfunction
+    );
+    artnet.setNodeName(settings.nodeName);
+    
+    if (artnet.listen(activeIP, 6454)) {
+      Serial.print("Artnet Listening on IP: ");
+      Serial.println(activeIP);
+    }
+  }
+}
+
+/**
+ * Main loop function
+ */
+void loop() {
+  // Handle web server requests
+  server.handleClient();
+  
+  // Check network status
+  if (!state.isAPMode) {
+    if (settings.useWiFi && WiFi.status() != WL_CONNECTED) {
+      Serial.println("Wi-Fi disconnected, restarting AP mode...");
+      startAPMode();
+    } else if (!settings.useWiFi && (ETH.localIP() == INADDR_NONE)) {
+      Serial.println("Ethernet disconnected, restarting AP mode...");
+      startAPMode();
+    }
+  }
+  
+  // Handle LED test cycle or static color
+  if (settings.enStatColor) {
+    // Apply static color regardless of previous state
+    applyStaticColor();
+    state.isStaticColorSet = true;
+  } else if (state.ledCycleEnabled) {
+    // Only run the cycle if static color is not enabled
+    cycleLEDs();
+    // Reset the static color flag
+    state.isStaticColorSet = false;
+  } else {
+    // If neither static color nor LED cycle is enabled, reset the flag
+    state.isStaticColorSet = false;
+  }
+}
+
+/**
+ * Load settings from preferences
+ */
+void loadSettings() {
+  preferences.begin("esp32config", true);
+  settings.numLedsPerOutput = preferences.getInt("numledsoutput", settings.numLedsPerOutput);
+  settings.numOutputs = preferences.getInt("numoutput", settings.numOutputs);
+  settings.startUniverse = preferences.getInt("startuniverse", settings.startUniverse);
+  settings.nodeName = preferences.getString("nodename", settings.nodeName);
+  settings.ledBrightness = preferences.getInt("ledbrightness", settings.ledBrightness);
+  settings.ssid = preferences.getString("ssid", settings.ssid);
+  settings.password = preferences.getString("password", settings.password);
+  settings.useWiFi = preferences.getBool("useWiFi", settings.useWiFi);
+  settings.staticColor = preferences.getString("staticColor", settings.staticColor);
+  settings.enStatColor = preferences.getBool("enStatColor", settings.enStatColor);
+  preferences.end();
+}
+
+/**
+ * Save settings to preferences
+ */
+void saveSettings() {
+  preferences.begin("esp32config", false);
+  preferences.putInt("numledsoutput", settings.numLedsPerOutput);
+  preferences.putInt("numoutput", settings.numOutputs);
+  preferences.putInt("startuniverse", settings.startUniverse);
+  preferences.putString("nodename", settings.nodeName);
+  preferences.putInt("ledbrightness", settings.ledBrightness);
+  preferences.putString("ssid", settings.ssid);
+  preferences.putString("password", settings.password);
+  preferences.putBool("useWiFi", settings.useWiFi);
+  preferences.putString("staticColor", settings.staticColor);
+  preferences.putBool("enStatColor", settings.enStatColor);
+  preferences.end();
+}
+
+/**
+ * Set up WiFi connection
+ */
+void setupWiFi() {
+  WiFi.begin(settings.ssid.c_str(), settings.password.c_str());
+  
+  display.clearDisplay();
+  display.setCursor(0,0);
+  display.println(F("Connecting to Wi-Fi..."));
+  display.display();
+  
+  while (millis() - state.startAttemptTime < CONNECTION_TIMEOUT) {
+    int remainingTime = (CONNECTION_TIMEOUT - (millis() - state.startAttemptTime)) / 1000;
+    
+    // Toggle status LED
+    state.ledState = !state.ledState;
+    setStatusLED(state.ledState ? 255 : 0, 0, 0);
+    
+    // Update display
+    display.clearDisplay();
+    display.setCursor(0,0);
+    display.println(F("Connecting to Wi-Fi..."));
+    display.setCursor(0,9);
+    display.print(F("Timeout in: "));
+    display.print(remainingTime);
+    display.print(F("s"));
+    display.display();
+    
+    Serial.print("Connecting to Wi-Fi... ");
+    Serial.print(remainingTime);
+    Serial.println("s remaining");
+    
+    // Check if connected
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.print("Wi-Fi connected. IP: ");
+      Serial.println(WiFi.localIP());
+      
+      // Set up web server
+      server.on("/", HTTP_GET, handleRoot);
+      server.on("/config", HTTP_POST, handleConfig);
+      server.begin();
+      Serial.println("HTTP server started (Wi-Fi).");
+      
+      // Update display
+      display.clearDisplay();
+      display.setCursor(0,0);
+      display.println(F("Wi-Fi connected"));
+      display.setCursor(0,9);
+      display.print(settings.ssid);
+      display.display();
+      
+      // Set status LED to green
+      setStatusLED(0, 255, 0);
+      return;
+    }
+    
+    delay(1000);
+  }
+  
+  // If connection failed
+  Serial.println("Wi-Fi connection failed, starting AP mode.");
+  startAPMode();
+}
+
+/**
+ * Set up Ethernet connection
+ */
+void setupEthernet() {
+  Serial.println("Initializing Ethernet...");
+  
+  display.clearDisplay();
+  display.setCursor(0,0);
+  display.println(F("Initializing Ethernet"));
+  display.display();
+  
+  ESP32_W5500_onEvent();
+  ETH.begin(MISO_GPIO, MOSI_GPIO, SCK_GPIO, CS_GPIO, INT_GPIO, SPI_CLOCK_MHZ, ETH_SPI_HOST);
+  
+  while (millis() - state.startAttemptTime < CONNECTION_TIMEOUT) {
+    int remainingTime = (CONNECTION_TIMEOUT - (millis() - state.startAttemptTime)) / 1000;
+    
+    // Check if we have a valid IP
+    if (ETH.localIP() != INADDR_NONE) {
+      Serial.println("Ethernet connected successfully.");
+      Serial.print("IP Address: ");
+      Serial.println(ETH.localIP());
+      
+      // Set up web server routes
+      server.on("/", HTTP_GET, handleRoot);
+      server.on("/config", HTTP_POST, handleConfig);
+      server.begin();
+      Serial.println("HTTP server started (Ethernet).");
+      
+      // Update display
+      display.clearDisplay();
+      display.setCursor(0,0);
+      display.print(F("Ethernet connected"));
+      display.setCursor(0,9);
+      display.print(settings.nodeName);
+      display.display();
+      
+      // Set status LED to green
+      setStatusLED(0, 255, 0);
+      return;
+    }
+    
+    // Toggle status LED
+    state.ledState = !state.ledState;
+    setStatusLED(state.ledState ? 255 : 0, 0, 0);
+    
+    // Update display
+    display.clearDisplay();
+    display.setCursor(0,0);
+    display.println(F("Initializing Ethernet"));
+    display.setCursor(0,9);
+    display.print(F("Timeout in: "));
+    display.print(remainingTime);
+    display.print(F("s"));
+    display.display();
+    
+    Serial.print("Waiting for Ethernet connection... ");
+    Serial.print(remainingTime);
+    Serial.println("s remaining");
+    
+    delay(1000);
+  }
+  
+  // If Ethernet connection fails
+  Serial.println("Ethernet connection failed. Starting AP mode...");
+  startAPMode();
+}
+
+/**
+ * Start Access Point mode
+ */
+void startAPMode() {
+  state.isAPMode = true;
+  WiFi.softAP(settings.nodeName.c_str());
+  IPAddress IP = WiFi.softAPIP();
+  
+  Serial.print("AP Mode started. Connect to Wi-Fi SSID: ");
+  Serial.println(settings.nodeName);
+  Serial.print("Access Point IP: ");
+  Serial.println(IP);
+  
+  // Set up web server
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/config", HTTP_POST, handleConfig);
+  server.begin();
+  Serial.println("HTTP server started (AP mode).");
+  
+  // Set status LED to blue
+  setStatusLED(0, 0, 255);
+  
+  // Update display
+  display.clearDisplay();
+  display.setCursor(0,0);
+  display.print("AP Mode");
+  display.setCursor(0,9);
+  display.print(settings.nodeName);
+  display.setCursor(0,18);
+  display.print("IP:");
+  display.print(IP);
+  display.display();
+}
+
+/**
+ * Cycle LEDs through RGB test pattern
+ */
+void cycleLEDs() {
+  if (millis() - state.lastUpdate >= CYCLE_DELAY) {
+    state.lastUpdate = millis();
+    
+    // Determine color based on cycle
+    uint32_t color;
+    switch (state.currentColor) {
+      case 0: color = strips[0]->Color(255, 0, 0); break;  // Red
+      case 1: color = strips[0]->Color(0, 255, 0); break;  // Green
+      case 2: color = strips[0]->Color(0, 0, 255); break;  // Blue
+    }
+    
+    // Apply color to all strips
+    for (int i = 0; i < settings.numOutputs; i++) {
+      for (int j = 0; j < settings.numLedsPerOutput; j++) {
+        strips[i]->setPixelColor(j, color);
+      }
+      strips[i]->show();
+    }
+    
+    // Move to the next color in cycle
+    state.currentColor = (state.currentColor + 1) % 3;
+  }
+}
+
+/**
+ * Set status LED color
+ */
+void setStatusLED(uint8_t r, uint8_t g, uint8_t b) {
+  StatusLed.setPixelColor(0, StatusLed.Color(r/2, g/2, b/2));  // Reduce brightness
+  StatusLed.show();
+}
+
+/**
+ * Apply static color to all LEDs
+ */
+void applyStaticColor() {
+  if (!settings.enStatColor) return;
+  
+  uint32_t color = strtol(settings.staticColor.substring(1).c_str(), NULL, 16);
+  for (int i = 0; i < settings.numOutputs; i++) {
+    for (int j = 0; j < settings.numLedsPerOutput; j++) {
+      strips[i]->setPixelColor(j, color);
+    }
+    strips[i]->show();
+  }
+}
+
+/**
+ * Handle root page of web server
+ */
 void handleRoot() {
   String content = "<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">";  
   content += "<link rel=\"icon\" href=\"data:,\">"; // Empty favicon
@@ -89,332 +469,75 @@ void handleRoot() {
   content += "input[type='text'] { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ccc; border-radius: 4px; font-size: 16px; }";
   content += "input[type='submit'] { background-color: #4CAF50; color: white; border: none; padding: 12px; font-size: 16px; cursor: pointer; border-radius: 4px; width: 100%; }";
   content += "input[type='submit']:hover { background-color: #45a049; }";
-  content += ".warning { margin-top: 20px; color: #d9534f; font-size: 14px; }"; // Warning text style
+  content += ".warning { margin-top: 20px; color: #d9534f; font-size: 14px; }";
   content += "</style></head>";
-  content += "<body><h1>" + nodename + " Configuration</h1>";
+  content += "<body><h1>" + settings.nodeName + " Configuration</h1>";
   content += "<form method='POST' action='/config'>";
-  content += "<label for='numledsoutput'>Number of LEDs per output (Max. 680):</label>";
-  content += "<input type='text' id='numledsoutput' name='numledsoutput' value='" + String(numledsoutput) + "'><br>";
-  content += "<label for='numoutput'>Number of outputs (Max. 4):</label>";
-  content += "<input type='text' id='numoutput' name='numoutput' value='" + String(numoutput) + "'><br>";
-  content += "<label for='startuniverse'>Start universe:</label>";
-  content += "<input type='text' id='startuniverse' name='startuniverse' value='" + String(startuniverse) + "'><br>";
   content += "<label for='nodename'>Artnet Node name:</label>";
-  content += "<input type='text' id='nodename' name='nodename' value='" + nodename + "'><br>";
+  content += "<input type='text' id='nodename' name='nodename' value='" + settings.nodeName + "'><br>";
+  content += "<label for='numledsoutput'>Number of LEDs per output (Max. 680):</label>";
+  content += "<input type='text' id='numledsoutput' name='numledsoutput' value='" + String(settings.numLedsPerOutput) + "'><br>";
+  content += "<label for='numoutput'>Number of outputs (Max. 4):</label>";
+  content += "<input type='text' id='numoutput' name='numoutput' value='" + String(settings.numOutputs) + "'><br>";
+  content += "<label for='startuniverse'>Start universe:</label>";
+  content += "<input type='text' id='startuniverse' name='startuniverse' value='" + String(settings.startUniverse) + "'><br>";
+  content += "<label for='ledbrightness'>Max. LED brightness:</label>";
+  content += "<input type='range' id='ledbrightness' name='ledbrightness' min='0' max='255' value='" + String(settings.ledBrightness) + "' oninput='brightnessValue.value=this.value'>";
+  content += "<output id='brightnessValue'>" + String(settings.ledBrightness) + "</output><br>";
+  content += "<label for='staticColor'>Static RGB Color (Hex):</label>";
+  content += "<input type='color' id='staticColor' name='staticColor' placeholder='#FF0000' value='" + settings.staticColor + "'><br>";
+  content += "<label for='enStatColor'>Enable Static Color:</label>";
+  content += "<input type='checkbox' id='enStatColor' name='enStatColor' " + String(settings.enStatColor ? "checked" : "") + "><br>";
   content += "<label for='ledCycleEnabled'>Enable RGB Test Cycle:</label>";
-  content += "<input type='checkbox' id='ledCycleEnabled' name='ledCycleEnabled' " + String(ledCycleEnabled ? "checked" : "") + "><br>";
+  content += "<input type='checkbox' id='ledCycleEnabled' name='ledCycleEnabled' " + String(state.ledCycleEnabled ? "checked" : "") + "><br>";
   content += "<label for='useWiFi'>Use Wi-Fi:</label>";
-  content += "<input type='checkbox' id='useWiFi' name='useWiFi' " + String(useWiFi ? "checked" : "") + "><br>";
+  content += "<input type='checkbox' id='useWiFi' name='useWiFi' " + String(settings.useWiFi ? "checked" : "") + "><br>";
   content += "<label for='ssid'>SSID:</label>";
-  content += "<input type='text' id='ssid' name='ssid' value='" + ssid + "'><br>";
+  content += "<input type='text' id='ssid' name='ssid' value='" + settings.ssid + "'><br>";
   content += "<label for='password'>Password:</label>";
-  content += "<input type='text' id='password' name='password' value='" + password + "'><br>";
+  content += "<input type='text' id='password' name='password' value='" + settings.password + "'><br>";
   content += "<input type='submit' value='Save'>";
   content += "</form>";
-  // Warning section
   content += "<div class='warning'>";
   content += "<p><strong>Warning:</strong> Please ensure that the settings on the node (number of pixels/universes) are the same as in your software to prevent errors.</p>";
   content += "</div>";
   content += "</body></html>";
   
-  server.send(200, "text/html", content); // Send HTML response
+  server.send(200, "text/html", content);
 }
 
+/**
+ * Handle configuration form submission
+ */
 void handleConfig() {
-    if (server.method() == HTTP_POST) {
-        if (server.hasArg("numledsoutput")) numledsoutput = server.arg("numledsoutput").toInt();
-        if (server.hasArg("numoutput")) numoutput = server.arg("numoutput").toInt();
-        if (server.hasArg("startuniverse")) startuniverse = server.arg("startuniverse").toInt();
-        if (server.hasArg("nodename")) nodename = server.arg("nodename");
-        if (server.hasArg("ssid")) ssid = server.arg("ssid");
-        if (server.hasArg("password")) password = server.arg("password");
-        useWiFi = server.hasArg("useWiFi");
-        ledCycleEnabled = server.hasArg("ledCycleEnabled"); // Process new checkbox value
+  if (server.method() == HTTP_POST) {
+    // Update settings from form data
+    if (server.hasArg("numledsoutput")) settings.numLedsPerOutput = server.arg("numledsoutput").toInt();
+    if (server.hasArg("numoutput")) settings.numOutputs = server.arg("numoutput").toInt();
+    if (server.hasArg("startuniverse")) settings.startUniverse = server.arg("startuniverse").toInt();
+    if (server.hasArg("nodename")) settings.nodeName = server.arg("nodename");
+    if (server.hasArg("ledbrightness")) settings.ledBrightness = server.arg("ledbrightness").toInt();
+    if (server.hasArg("ssid")) settings.ssid = server.arg("ssid");
+    if (server.hasArg("password")) settings.password = server.arg("password");
+    if (server.hasArg("staticColor")) settings.staticColor = server.arg("staticColor");
+    
+    // Update boolean settings
+    settings.useWiFi = server.hasArg("useWiFi");
+    state.ledCycleEnabled = server.hasArg("ledCycleEnabled");
+    settings.enStatColor = server.hasArg("enStatColor");
+    
+    state.isStaticColorSet = false;
 
-        preferences.begin("esp32config", false);
-        preferences.putInt("numledsoutput", numledsoutput);
-        preferences.putInt("numoutput", numoutput);
-        preferences.putInt("startuniverse", startuniverse);
-        preferences.putString("nodename", nodename);
-        preferences.putString("ssid", ssid);
-        preferences.putString("password", password);
-        preferences.putBool("useWiFi", useWiFi);
-        preferences.end();
-
-        server.sendHeader("Location", "/", true);
-        server.send(302, "text/plain", "");
-
-        if (!ledCycleEnabled){
-          ESP.restart();
-        }
+    // Save settings to preferences
+    saveSettings();
+    
+    // Redirect back to root page
+    server.sendHeader("Location", "/", true);
+    server.send(302, "text/plain", "");
+    
+    // Restart if needed
+    if (!state.ledCycleEnabled && !settings.enStatColor) {
+      ESP.restart();
     }
-}
-
-void setupWiFi() {
-    WiFi.begin(ssid.c_str(), password.c_str());
-
-    display.clearDisplay();
-    display.setCursor(0,0);
-    display.println(F("Connecting to Wi-Fi..."));
-    display.display();
-
-    while (millis() - startAttemptTime < connectionTimeout) {
-        int remainingTime = (connectionTimeout - (millis() - startAttemptTime)) / 1000;
-
-        ledState = !ledState;
-        setStatusLED(0, 0, 0);
-        if (ledState) {
-            setStatusLED(255, 0, 0);  // Turn LED ON
-        }
-
-        display.clearDisplay();
-        display.setCursor(0,0);
-        display.println(F("Connecting to Wi-Fi..."));
-        display.setCursor(0,9);
-        display.print(F("Timeout in: "));
-        display.print(remainingTime);
-        display.print(F("s"));
-        display.display();
-
-        Serial.print("Connecting to Wi-Fi... ");
-        Serial.print(remainingTime);
-        Serial.println("s remaining");
-
-        delay(1000);
-    }
-
-    if (WiFi.status() == WL_CONNECTED) {
-        Serial.print("Wi-Fi connected. IP: ");
-        Serial.println(WiFi.localIP());
-
-        server.on("/", HTTP_GET, handleRoot);
-        server.on("/config", HTTP_POST, handleConfig);
-        server.begin();
-        Serial.println("HTTP server started (Wi-Fi).");
-
-        display.clearDisplay();
-        display.setCursor(0,0);
-        display.println(F("Wi-Fi connected"));
-        display.setCursor(0,9);
-        display.print(ssid);
-        display.display();
-
-        setStatusLED(0, 255, 0);
-
-    } else {
-        Serial.println("Wi-Fi connection failed, starting AP mode.");
-        startAPMode();
-    }
-}
-
-void setupEthernet() {
-    Serial.println("Initializing Ethernet...");
-
-    display.clearDisplay();
-    display.setCursor(0,0);
-    display.println(F("Initializing Ethernet"));
-    display.display();
-
-    ESP32_W5500_onEvent();
-    ETH.begin(MISO_GPIO, MOSI_GPIO, SCK_GPIO, CS_GPIO, INT_GPIO, SPI_CLOCK_MHZ, ETH_SPI_HOST);
-
-    while (millis() - startAttemptTime < connectionTimeout) {
-        int remainingTime = (connectionTimeout - (millis() - startAttemptTime)) / 1000;
-
-        // Check if we have a valid IP
-        if (ETH.localIP() != INADDR_NONE) {
-            Serial.println("Ethernet connected successfully.");
-            Serial.print("IP Address: ");
-            Serial.println(ETH.localIP());
-
-            // Set up web server routes
-            server.on("/", HTTP_GET, handleRoot);
-            server.on("/config", HTTP_POST, handleConfig);
-            server.begin();
-            Serial.println("HTTP server started (Ethernet).");
-
-            display.clearDisplay();
-            display.setCursor(0,0);
-            display.print(F("Ethernet connected"));
-            display.setCursor(0,9);
-            display.print(nodename);
-            display.display();
-
-            setStatusLED(0, 255, 0);
-
-            return;
-        }
-
-        // Update LED
-        ledState = !ledState;
-        setStatusLED(0, 0, 0);
-        if (ledState) {
-            setStatusLED(255, 0, 0);  // Turn LED ON
-        }
-
-        // Update display with countdown timer
-        display.clearDisplay();
-        display.setCursor(0,0);
-        display.println(F("Initializing Ethernet"));
-        display.setCursor(0,9);
-        display.print(F("Timeout in: "));
-        display.print(remainingTime);
-        display.print(F("s"));
-        display.display();
-
-        Serial.print("Waiting for Ethernet connection... ");
-        Serial.print(remainingTime);
-        Serial.println("s remaining");
-
-        delay(1000);
-    }
-
-    // If Ethernet connection fails
-    Serial.println("Ethernet connection failed. Starting AP mode...");
-    startAPMode();
-}
-
-
-void startAPMode() {
-    isAPMode = true;
-    WiFi.softAP(nodename.c_str());
-    IPAddress IP = WiFi.softAPIP();
-    Serial.print("AP Mode started. Connect to Wi-Fi SSID: ");
-    Serial.println(nodename);
-    Serial.print("Access Point IP: ");
-    Serial.println(IP);
-
-    server.on("/", HTTP_GET, handleRoot);
-    server.on("/config", HTTP_POST, handleConfig);
-    server.begin();
-    Serial.println("HTTP server started (AP mode).");
-
-    setStatusLED(0, 0, 255);
-
-    display.clearDisplay();
-    display.setCursor(0,0);
-    display.print("AP Mode");
-    display.setCursor(0,9);
-    display.print(nodename);
-    display.setCursor(0,18);
-    display.print("IP:");
-    display.print(IP);
-    display.display();
-}
-
-void cycleLEDs() {
-
-    if (millis() - lastUpdate >= cycleDelay) {
-        lastUpdate = millis();
-
-        // Determine color based on cycle
-        uint32_t color;
-        switch (currentColor) {
-            case 0: color = strips[0]->Color(255, 0, 0); break;  // Red
-            case 1: color = strips[0]->Color(0, 255, 0); break;  // Green
-            case 2: color = strips[0]->Color(0, 0, 255); break;  // Blue
-        }
-
-        // Apply color to all strips
-        for (int i = 0; i < NUMSTRIPS; i++) {
-            for (int j = 0; j < NUM_LEDS_PER_STRIP; j++) {
-                strips[i]->setPixelColor(j, color);
-            }
-            strips[i]->show();
-        }
-
-        // Move to the next color in cycle
-        currentColor = (currentColor + 1) % 3;
-    }
-}
-
-// Function to set LED color
-void setStatusLED(uint8_t r, uint8_t g, uint8_t b) {
-    StatusLed.setPixelColor(0, StatusLed.Color(r/2, g/2, b/2));  // Set first LED
-    StatusLed.show();  // Send data to LED
-}
-
-void setup() {
-    Serial.begin(115200);
-   
-    StatusLed.begin();    // Initialize NeoPixel
-    StatusLed.show();     // Ensure all LEDs are off at startup
-    setStatusLED(255, 255, 0);  // Example: Set LED to Red
-
-    if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
-      Serial.println(F("SSD1306 allocation failed"));
-    }
-
-    display.clearDisplay();
-    display.setTextSize(1);             // Normal 1:1 pixel scale
-    display.setTextColor(SSD1306_WHITE);// Draw white text
-    display.setCursor(0,0);             // Start at top-left corner
-    display.println(F("Initializing..."));
-    display.display();
-
-    preferences.begin("esp32config", true);
-    numledsoutput = preferences.getInt("numledsoutput", numledsoutput);
-    numoutput = preferences.getInt("numoutput", numoutput);
-    startuniverse = preferences.getInt("startuniverse", startuniverse);
-    nodename = preferences.getString("nodename", nodename);
-    ssid = preferences.getString("ssid", ssid);
-    password = preferences.getString("password", password);
-    useWiFi = preferences.getBool("useWiFi", useWiFi);
-    preferences.end();
-
-    driver.initled(NULL, pins, NUMSTRIPS, NUM_LEDS_PER_STRIP);
-    driver.setBrightness(100);
-
-    if (useWiFi) {
-        setupWiFi();
-    } else {
-        setupEthernet();
-    }
-
-    if (!isAPMode) {
-        IPAddress activeIP = useWiFi ? WiFi.localIP() : ETH.localIP();
-
-        display.setCursor(0,17);
-        display.print(F("ip:"));
-        display.print(activeIP);
-        display.setCursor(0,25);
-        display.print(F("leds:"));
-        display.print(numledsoutput);
-        display.print(F(" outputs:"));
-        display.print(numoutput);
-        display.display();
-
-        artnet.addSubArtnet(startuniverse, numledsoutput * numoutput * NB_CHANNEL_PER_LED, UNIVERSE_SIZE_IN_CHANNEL, &displayfunction);
-        artnet.setNodeName(nodename);
-
-        if (artnet.listen(activeIP, 6454)) {
-            Serial.print("Artnet Listening on IP: ");
-            Serial.println(activeIP);
-        }
-    }
-}
-
-void loop() {
-    server.handleClient();
-    if (!isAPMode && useWiFi && WiFi.status() != WL_CONNECTED) {
-        Serial.println("Wi-Fi disconnected, restarting AP mode...");
-        startAPMode();
-    } else if (!isAPMode && !useWiFi && (ETH.localIP() == INADDR_NONE)) {
-        Serial.println("Ethernet disconnected, restarting AP mode...");
-        startAPMode();
-    }
-
-        // Check if the test cycle should be enabled
-    if (ledCycleEnabled && !isCycleRunning) {
-        // If the cycle is enabled and it's not running, start the test pattern
-        Serial.println("Starting RGB test pattern.");
-        cycleLEDs();
-        isCycleRunning = true;  // Mark the cycle as running
-    }
-
-      // Run the LED cycle if it's enabled
-    if (ledCycleEnabled && isCycleRunning) {
-        cycleLEDs(); // Keep cycling the LEDs if enabled
-    }
-
+  }
 }
