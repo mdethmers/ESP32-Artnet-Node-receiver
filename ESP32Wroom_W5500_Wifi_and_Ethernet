@@ -6,26 +6,26 @@
 
 // Feature configuration
 #define DEBUG_ETHERNET_WEBSERVER_PORT Serial
-#define _ETHERNET_WEBSERVER_LOGLEVEL_ 3
+#define _ETHERNET_WEBSERVER_LOGLEVEL_ 1  // Reduced log level for less overhead
 #define UNIQUE_SUBARTNET
 
 // LED configuration
-#define NUM_LEDS_PER_STRIP 680 // Maximum number of LEDs per strip
-#define NUMSTRIPS 4           // Maximum number of LED strips
-#define NB_CHANNEL_PER_LED 3  // Number of channels per LED (3 for RGB, 4 for RGBW)
+#define NUM_LEDS_PER_STRIP 680        // Maximum number of LEDs per strip
+#define NUMSTRIPS 4                   // Maximum number of LED strips
+#define NB_CHANNEL_PER_LED 3          // Number of channels per LED (3 for RGB, 4 for RGBW)
 #define UNIVERSE_SIZE_IN_CHANNEL 510  // Size of a universe (170 pixels * 3 channels)
-#define COLOR_RBG          // Define color order (Green-Red-Blue)
+#define COLOR_RBG                     // Define color order (Green-Red-Blue)
 
 // Hardware configuration
-#define STATUS_LED_PIN 16      // WS2812 LED pin for status indicator
-#define SCREEN_WIDTH 128       // OLED display width, in pixels
-#define SCREEN_HEIGHT 32       // OLED display height, in pixels
-#define OLED_RESET 4           // Reset pin # (or -1 if sharing Arduino reset pin)
-#define SCREEN_ADDRESS 0x3C    // See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
+#define STATUS_LED_PIN 16
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 32
+#define OLED_RESET 4
+#define SCREEN_ADDRESS 0x3C
 
 // Include necessary libraries
 #include <Preferences.h>
-#include <WebServer_ESP32_W5500.h> 
+#include <WebServer_ESP32_W5500.h>
 #include <WebServer.h>
 #include "I2SClocklessLedDriver.h"
 #include "Arduino.h"
@@ -36,52 +36,10 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
-// Global objects
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
-Adafruit_NeoPixel StatusLed(1, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
-WebServer server(80);
-Preferences preferences;
-artnetESP32V2 artnet = artnetESP32V2();
-I2SClocklessLedDriver driver;
+// Default pin configuration
+const int DEFAULT_PINS[NUMSTRIPS] = {12, 14, 27, 26};
 
-// LED strip objects
-Adafruit_NeoPixel strip1(NUM_LEDS_PER_STRIP, 12, NEO_BRG + NEO_KHZ800);
-Adafruit_NeoPixel strip2(NUM_LEDS_PER_STRIP, 14, NEO_BRG + NEO_KHZ800);
-Adafruit_NeoPixel strip3(NUM_LEDS_PER_STRIP, 26, NEO_BRG + NEO_KHZ800);
-Adafruit_NeoPixel strip4(NUM_LEDS_PER_STRIP, 27, NEO_BRG + NEO_KHZ800);
-Adafruit_NeoPixel* strips[NUMSTRIPS] = { &strip1, &strip2, &strip3, &strip4 };
-
-// Default settings
-struct Settings {
-  int numLedsPerOutput = 680;
-  int numOutputs = 3;
-  int startUniverse = 0;
-  int pins[NUMSTRIPS] = {12, 14, 27, 26};
-  int ledBrightness = 255;
-  String nodeName = "Artnet Node ESP32";
-  String ssid = "";
-  String password = "";
-  bool useWiFi = false;
-  String staticColor = "#000000";
-  bool enStatColor = false;
-} settings;
-
-// Runtime state
-struct State {
-  bool isAPMode = false;
-  bool ledCycleEnabled = false;
-  bool isStaticColorSet = false;
-  uint8_t currentColor = 0;  // 0 = Red, 1 = Green, 2 = Blue
-  unsigned long lastUpdate = 0;
-  unsigned long startAttemptTime = 0;
-  bool ledState = false;
-} state;
-
-// Constants
-const unsigned long CONNECTION_TIMEOUT = 30000; // 30 seconds timeout
-const unsigned long CYCLE_DELAY = 1000;  // Change color every 1 second
-
-// Function prototypes
+// Forward declarations for functions
 void setupWiFi();
 void setupEthernet();
 void startAPMode();
@@ -92,6 +50,64 @@ void loadSettings();
 void saveSettings();
 void handleRoot();
 void handleConfig();
+void resetToDefaultPins();
+void updateStripPins();
+void displayStatus(const String& line1, const String& line2 = "", const String& line3 = "", const String& line4 = "");
+void displayConnectionStatus(const String& type, int remainingTime = -1);
+
+// Configuration structure
+struct Settings {
+  int numLedsPerOutput = 680;
+  int numOutputs = 4;
+  int startUniverse = 0;
+  int pins[NUMSTRIPS] = {12, 14, 27, 26};
+  int ledBrightness = 255;
+  String nodeName = "Artnet Node ESP32";
+  String ssid = "";
+  String password = "";
+  bool useWiFi = false;
+  String staticColor = "#000000";
+  bool enStatColor = false;
+  bool enableCustomPins = false;
+};
+
+// Runtime state
+struct State {
+  bool isAPMode = false;
+  bool ledCycleEnabled = false;
+  bool isStaticColorSet = false;
+  uint8_t currentColor = 0;  // 0 = Red, 1 = Green, 2 = Blue
+  unsigned long lastUpdate = 0;
+  unsigned long startAttemptTime = 0;
+  bool ledState = false;
+};
+
+// Constants
+const unsigned long CONNECTION_TIMEOUT = 30000; // 30 seconds timeout
+const unsigned long CYCLE_DELAY = 1000;         // Change color every 1 second
+
+// Global objects
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+Adafruit_NeoPixel StatusLed(1, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
+WebServer server(80);
+Preferences preferences;
+artnetESP32V2 artnet = artnetESP32V2();
+I2SClocklessLedDriver driver;
+
+// LED storage
+uint8_t ledData[NB_CHANNEL_PER_LED * NUMSTRIPS * NUM_LEDS_PER_STRIP];
+
+// Settings and state
+Settings settings;
+State state;
+
+// LED strip objects
+Adafruit_NeoPixel strips[NUMSTRIPS] = {
+  Adafruit_NeoPixel(NUM_LEDS_PER_STRIP, DEFAULT_PINS[0], NEO_BRG + NEO_KHZ800),
+  Adafruit_NeoPixel(NUM_LEDS_PER_STRIP, DEFAULT_PINS[1], NEO_BRG + NEO_KHZ800),
+  Adafruit_NeoPixel(NUM_LEDS_PER_STRIP, DEFAULT_PINS[2], NEO_BRG + NEO_KHZ800),
+  Adafruit_NeoPixel(NUM_LEDS_PER_STRIP, DEFAULT_PINS[3], NEO_BRG + NEO_KHZ800)
+};
 
 // ArtNet callback function
 void displayfunction(void *param) {
@@ -107,27 +123,22 @@ void setup() {
   
   // Initialize status LED
   StatusLed.begin();
-  StatusLed.show();
   setStatusLED(255, 255, 0);  // Yellow during initialization
   
   // Initialize OLED display
   if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
     Serial.println(F("SSD1306 allocation failed"));
   }
-  
-  // Show initial message
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0,0);
-  display.println(F("Initializing..."));
-  display.display();
+  displayStatus("Initializing...");
   
   // Load settings from preferences
   loadSettings();
   
+  // Update strip pins based on loaded settings
+  updateStripPins();
+  
   // Initialize LED driver
-  driver.initled(NULL, settings.pins, NUMSTRIPS, NUM_LEDS_PER_STRIP);
+  driver.initled(ledData, settings.pins, NUMSTRIPS, NUM_LEDS_PER_STRIP);
   driver.setBrightness(settings.ledBrightness);
   
   // Initialize networking
@@ -143,15 +154,10 @@ void setup() {
     IPAddress activeIP = settings.useWiFi ? WiFi.localIP() : ETH.localIP();
     
     // Update display with connection info
-    display.setCursor(0,17);
-    display.print(F("ip:"));
-    display.print(activeIP);
-    display.setCursor(0,25);
-    display.print(F("leds:"));
-    display.print(settings.numLedsPerOutput);
-    display.print(F(" outputs:"));
-    display.print(settings.numOutputs);
-    display.display();
+    String ipStr = activeIP.toString();
+    String ledsInfo = "LEDs:" + String(settings.numLedsPerOutput) + 
+                      " Out:" + String(settings.numOutputs);
+    displayStatus(settings.nodeName, ipStr, ledsInfo);
     
     // Initialize ArtNet
     artnet.addSubArtnet(
@@ -178,28 +184,39 @@ void loop() {
   
   // Check network status
   if (!state.isAPMode) {
-    if (settings.useWiFi && WiFi.status() != WL_CONNECTED) {
-      Serial.println("Wi-Fi disconnected, restarting AP mode...");
-      startAPMode();
-    } else if (!settings.useWiFi && (ETH.localIP() == INADDR_NONE)) {
-      Serial.println("Ethernet disconnected, restarting AP mode...");
+    bool networkDisconnected = (settings.useWiFi && WiFi.status() != WL_CONNECTED) || 
+                             (!settings.useWiFi && (ETH.localIP() == INADDR_NONE));
+    
+    if (networkDisconnected) {
+      Serial.println("Network disconnected, restarting AP mode...");
       startAPMode();
     }
   }
   
   // Handle LED test cycle or static color
-  if (settings.enStatColor) {
-    // Apply static color regardless of previous state
+  if (settings.enStatColor && !state.isStaticColorSet) {
     applyStaticColor();
     state.isStaticColorSet = true;
   } else if (state.ledCycleEnabled) {
-    // Only run the cycle if static color is not enabled
     cycleLEDs();
-    // Reset the static color flag
     state.isStaticColorSet = false;
-  } else {
-    // If neither static color nor LED cycle is enabled, reset the flag
+  } else if (!settings.enStatColor) {
     state.isStaticColorSet = false;
+  }
+}
+
+/**
+ * Update all LED strip pins according to settings
+ */
+void updateStripPins() {
+  for (int i = 0; i < NUMSTRIPS; i++) {
+    if (strips[i].getPin() != settings.pins[i]) {
+      Serial.printf("Strip %d pin changed from %d to %d\n", 
+                    i, strips[i].getPin(), settings.pins[i]);
+      
+      strips[i].setPin(settings.pins[i]);
+      strips[i].begin();
+    }
   }
 }
 
@@ -208,6 +225,7 @@ void loop() {
  */
 void loadSettings() {
   preferences.begin("esp32config", true);
+  
   settings.numLedsPerOutput = preferences.getInt("numledsoutput", settings.numLedsPerOutput);
   settings.numOutputs = preferences.getInt("numoutput", settings.numOutputs);
   settings.startUniverse = preferences.getInt("startuniverse", settings.startUniverse);
@@ -218,7 +236,32 @@ void loadSettings() {
   settings.useWiFi = preferences.getBool("useWiFi", settings.useWiFi);
   settings.staticColor = preferences.getString("staticColor", settings.staticColor);
   settings.enStatColor = preferences.getBool("enStatColor", settings.enStatColor);
+  settings.enableCustomPins = preferences.getBool("enCustomPins", false);
+  
+  // Load pins
+  for (int i = 0; i < NUMSTRIPS; i++) {
+    char pinKey[10];
+    sprintf(pinKey, "pin%d", i);
+    settings.pins[i] = preferences.getInt(pinKey, DEFAULT_PINS[i]);
+  }
+  
+  // If custom pins not enabled, use default pins
+  if (!settings.enableCustomPins) {
+    for (int i = 0; i < NUMSTRIPS; i++) {
+      settings.pins[i] = DEFAULT_PINS[i];
+    }
+  }
+  
   preferences.end();
+}
+
+/**
+ * Reset pins to default values
+ */
+void resetToDefaultPins() {
+  for (int i = 0; i < NUMSTRIPS; i++) {
+    settings.pins[i] = DEFAULT_PINS[i];
+  }
 }
 
 /**
@@ -226,6 +269,7 @@ void loadSettings() {
  */
 void saveSettings() {
   preferences.begin("esp32config", false);
+  
   preferences.putInt("numledsoutput", settings.numLedsPerOutput);
   preferences.putInt("numoutput", settings.numOutputs);
   preferences.putInt("startuniverse", settings.startUniverse);
@@ -236,7 +280,59 @@ void saveSettings() {
   preferences.putBool("useWiFi", settings.useWiFi);
   preferences.putString("staticColor", settings.staticColor);
   preferences.putBool("enStatColor", settings.enStatColor);
+  preferences.putBool("enCustomPins", settings.enableCustomPins);
+  
+  // Save pins
+  for (int i = 0; i < NUMSTRIPS; i++) {
+    char pinKey[10];
+    sprintf(pinKey, "pin%d", i);
+    preferences.putInt(pinKey, settings.pins[i]);
+  }
+  
   preferences.end();
+}
+
+/**
+ * Display multiple lines on the OLED screen
+ */
+void displayStatus(const String& line1, const String& line2, const String& line3, const String& line4) {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  
+  display.setCursor(0, 0);
+  display.println(line1);
+  
+  if (line2.length() > 0) {
+    display.setCursor(0, 9);
+    display.println(line2);
+  }
+  
+  if (line3.length() > 0) {
+    display.setCursor(0, 18);
+    display.println(line3);
+  }
+  
+  if (line4.length() > 0) {
+    display.setCursor(0, 27);
+    display.println(line4);
+  }
+  
+  display.display();
+}
+
+/**
+ * Display connection status with timeout
+ */
+void displayConnectionStatus(const String& type, int remainingTime) {
+  String line1 = "Connecting to " + type;
+  String line2 = "";
+  
+  if (remainingTime >= 0) {
+    line2 = "Timeout in: " + String(remainingTime) + "s";
+  }
+  
+  displayStatus(line1, line2);
 }
 
 /**
@@ -244,11 +340,7 @@ void saveSettings() {
  */
 void setupWiFi() {
   WiFi.begin(settings.ssid.c_str(), settings.password.c_str());
-  
-  display.clearDisplay();
-  display.setCursor(0,0);
-  display.println(F("Connecting to Wi-Fi..."));
-  display.display();
+  displayStatus("Connecting to Wi-Fi...");
   
   while (millis() - state.startAttemptTime < CONNECTION_TIMEOUT) {
     int remainingTime = (CONNECTION_TIMEOUT - (millis() - state.startAttemptTime)) / 1000;
@@ -257,40 +349,16 @@ void setupWiFi() {
     state.ledState = !state.ledState;
     setStatusLED(state.ledState ? 255 : 0, 0, 0);
     
-    // Update display
-    display.clearDisplay();
-    display.setCursor(0,0);
-    display.println(F("Connecting to Wi-Fi..."));
-    display.setCursor(0,9);
-    display.print(F("Timeout in: "));
-    display.print(remainingTime);
-    display.print(F("s"));
-    display.display();
-    
-    Serial.print("Connecting to Wi-Fi... ");
-    Serial.print(remainingTime);
-    Serial.println("s remaining");
+    displayConnectionStatus("Wi-Fi", remainingTime);
     
     // Check if connected
     if (WiFi.status() == WL_CONNECTED) {
-      Serial.print("Wi-Fi connected. IP: ");
-      Serial.println(WiFi.localIP());
-      
       // Set up web server
       server.on("/", HTTP_GET, handleRoot);
       server.on("/config", HTTP_POST, handleConfig);
       server.begin();
-      Serial.println("HTTP server started (Wi-Fi).");
       
-      // Update display
-      display.clearDisplay();
-      display.setCursor(0,0);
-      display.println(F("Wi-Fi connected"));
-      display.setCursor(0,9);
-      display.print(settings.ssid);
-      display.display();
-      
-      // Set status LED to green
+      displayStatus("Wi-Fi connected", settings.ssid);
       setStatusLED(0, 255, 0);
       return;
     }
@@ -299,7 +367,6 @@ void setupWiFi() {
   }
   
   // If connection failed
-  Serial.println("Wi-Fi connection failed, starting AP mode.");
   startAPMode();
 }
 
@@ -307,12 +374,7 @@ void setupWiFi() {
  * Set up Ethernet connection
  */
 void setupEthernet() {
-  Serial.println("Initializing Ethernet...");
-  
-  display.clearDisplay();
-  display.setCursor(0,0);
-  display.println(F("Initializing Ethernet"));
-  display.display();
+  displayStatus("Initializing Ethernet");
   
   ESP32_W5500_onEvent();
   ETH.begin(MISO_GPIO, MOSI_GPIO, SCK_GPIO, CS_GPIO, INT_GPIO, SPI_CLOCK_MHZ, ETH_SPI_HOST);
@@ -322,25 +384,12 @@ void setupEthernet() {
     
     // Check if we have a valid IP
     if (ETH.localIP() != INADDR_NONE) {
-      Serial.println("Ethernet connected successfully.");
-      Serial.print("IP Address: ");
-      Serial.println(ETH.localIP());
-      
       // Set up web server routes
       server.on("/", HTTP_GET, handleRoot);
       server.on("/config", HTTP_POST, handleConfig);
       server.begin();
-      Serial.println("HTTP server started (Ethernet).");
       
-      // Update display
-      display.clearDisplay();
-      display.setCursor(0,0);
-      display.print(F("Ethernet connected"));
-      display.setCursor(0,9);
-      display.print(settings.nodeName);
-      display.display();
-      
-      // Set status LED to green
+      displayStatus("Ethernet connected", settings.nodeName);
       setStatusLED(0, 255, 0);
       return;
     }
@@ -348,26 +397,12 @@ void setupEthernet() {
     // Toggle status LED
     state.ledState = !state.ledState;
     setStatusLED(state.ledState ? 255 : 0, 0, 0);
-    
-    // Update display
-    display.clearDisplay();
-    display.setCursor(0,0);
-    display.println(F("Initializing Ethernet"));
-    display.setCursor(0,9);
-    display.print(F("Timeout in: "));
-    display.print(remainingTime);
-    display.print(F("s"));
-    display.display();
-    
-    Serial.print("Waiting for Ethernet connection... ");
-    Serial.print(remainingTime);
-    Serial.println("s remaining");
+    displayConnectionStatus("Ethernet", remainingTime);
     
     delay(1000);
   }
   
   // If Ethernet connection fails
-  Serial.println("Ethernet connection failed. Starting AP mode...");
   startAPMode();
 }
 
@@ -379,30 +414,16 @@ void startAPMode() {
   WiFi.softAP(settings.nodeName.c_str());
   IPAddress IP = WiFi.softAPIP();
   
-  Serial.print("AP Mode started. Connect to Wi-Fi SSID: ");
-  Serial.println(settings.nodeName);
-  Serial.print("Access Point IP: ");
-  Serial.println(IP);
-  
   // Set up web server
   server.on("/", HTTP_GET, handleRoot);
   server.on("/config", HTTP_POST, handleConfig);
   server.begin();
-  Serial.println("HTTP server started (AP mode).");
   
   // Set status LED to blue
   setStatusLED(0, 0, 255);
   
   // Update display
-  display.clearDisplay();
-  display.setCursor(0,0);
-  display.print("AP Mode");
-  display.setCursor(0,9);
-  display.print(settings.nodeName);
-  display.setCursor(0,18);
-  display.print("IP:");
-  display.print(IP);
-  display.display();
+  displayStatus("AP Mode", settings.nodeName, "IP:" + IP.toString());
 }
 
 /**
@@ -415,17 +436,17 @@ void cycleLEDs() {
     // Determine color based on cycle
     uint32_t color;
     switch (state.currentColor) {
-      case 0: color = strips[0]->Color(255, 0, 0); break;  // Red
-      case 1: color = strips[0]->Color(0, 255, 0); break;  // Green
-      case 2: color = strips[0]->Color(0, 0, 255); break;  // Blue
+      case 0: color = strips[0].Color(settings.ledBrightness, 0, 0); break;  // Red
+      case 1: color = strips[0].Color(0, settings.ledBrightness, 0); break;  // Green
+      case 2: color = strips[0].Color(0, 0, settings.ledBrightness); break;  // Blue
     }
     
     // Apply color to all strips
     for (int i = 0; i < settings.numOutputs; i++) {
       for (int j = 0; j < settings.numLedsPerOutput; j++) {
-        strips[i]->setPixelColor(j, color);
+        strips[i].setPixelColor(j, color);
       }
-      strips[i]->show();
+      strips[i].show();
     }
     
     // Move to the next color in cycle
@@ -450,64 +471,165 @@ void applyStaticColor() {
   uint32_t color = strtol(settings.staticColor.substring(1).c_str(), NULL, 16);
   for (int i = 0; i < settings.numOutputs; i++) {
     for (int j = 0; j < settings.numLedsPerOutput; j++) {
-      strips[i]->setPixelColor(j, color);
+      strips[i].setPixelColor(j, color);
     }
-    strips[i]->show();
+    strips[i].show();
   }
 }
+
+/**
+ * CSS styles for web interface
+ */
+const char* const CSS_STYLES = R"(
+body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f4f4f4; color: #333; text-align: center; }
+h1 { font-size: 24px; margin-bottom: 20px; }
+form { background-color: #fff; padding: 20px; padding-right: 40px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1); max-width: 400px; margin: auto; }
+input[type='text'], input[type='number'] { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ccc; border-radius: 4px; font-size: 16px; }
+input[type='submit'] { background-color: #4CAF50; color: white; border: none; padding: 12px; font-size: 16px; cursor: pointer; border-radius: 4px; width: 100%; }
+input[type='submit']:hover { background-color: #45a049; }
+.warning { margin-top: 20px; color: #d9534f; font-size: 14px; }
+.pin-input { width: 60px !important; display: inline-block; margin-right: 10px; }
+.pin-container { margin: 10px 0; }
+.pin-label { display: inline-block; width: 100px; text-align: left; }
+.default-pin { color: #666; font-size: 0.9em; margin-left: 5px; }
+)";
+
+/**
+ * JavaScript for web interface
+ */
+const char* const JS_CODE = R"(
+function togglePinInputs() {
+  var container = document.getElementById('pin-container');
+  var enableCustomPins = document.getElementById('enableCustomPins').checked;
+  container.style.display = enableCustomPins ? 'block' : 'none';
+}
+window.onload = function() {
+  togglePinInputs();
+};
+)";
 
 /**
  * Handle root page of web server
  */
 void handleRoot() {
-  String content = "<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">";  
-  content += "<link rel=\"icon\" href=\"data:,\">"; // Empty favicon
-  content += "<style>";
-  content += "body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f4f4f4; color: #333; text-align: center; }";
-  content += "h1 { font-size: 24px; margin-bottom: 20px; }";
-  content += "form { background-color: #fff; padding: 20px; padding-right: 40px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1); max-width: 400px; margin: auto; }";
-  content += "input[type='text'] { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ccc; border-radius: 4px; font-size: 16px; }";
-  content += "input[type='submit'] { background-color: #4CAF50; color: white; border: none; padding: 12px; font-size: 16px; cursor: pointer; border-radius: 4px; width: 100%; }";
-  content += "input[type='submit']:hover { background-color: #45a049; }";
-  content += ".warning { margin-top: 20px; color: #d9534f; font-size: 14px; }";
-  content += "</style></head>";
-  content += "<body><h1>" + settings.nodeName + " Configuration</h1>";
-  content += "<form method='POST' action='/config'>";
-  content += "<label for='nodename'>Artnet Node name:</label>";
-  content += "<input type='text' id='nodename' name='nodename' value='" + settings.nodeName + "'><br>";
-  content += "<label for='numledsoutput'>Number of LEDs per output (Max. 680):</label>";
-  content += "<input type='text' id='numledsoutput' name='numledsoutput' value='" + String(settings.numLedsPerOutput) + "'><br>";
-  content += "<label for='numoutput'>Number of outputs (Max. 4):</label>";
-  content += "<input type='text' id='numoutput' name='numoutput' value='" + String(settings.numOutputs) + "'><br>";
-  content += "<label for='startuniverse'>Start universe:</label>";
-  content += "<input type='text' id='startuniverse' name='startuniverse' value='" + String(settings.startUniverse) + "'><br>";
-  content += "<label for='ledbrightness'>Max. LED brightness:</label>";
-  content += "<input type='range' id='ledbrightness' name='ledbrightness' min='0' max='255' value='" + String(settings.ledBrightness) + "' oninput='brightnessValue.value=this.value'>";
-  content += "<output id='brightnessValue'>" + String(settings.ledBrightness) + "</output><br>";
-  content += "<label for='staticColor'>Static RGB Color (Hex):</label>";
-  content += "<input type='color' id='staticColor' name='staticColor' placeholder='#FF0000' value='" + settings.staticColor + "'><br>";
-  content += "<label for='enStatColor'>Enable Static Color:</label>";
-  content += "<input type='checkbox' id='enStatColor' name='enStatColor' " + String(settings.enStatColor ? "checked" : "") + "><br>";
-  content += "<label for='ledCycleEnabled'>Enable RGB Test Cycle:</label>";
-  content += "<input type='checkbox' id='ledCycleEnabled' name='ledCycleEnabled' " + String(state.ledCycleEnabled ? "checked" : "") + "><br>";
-  content += "<label for='useWiFi'>Use Wi-Fi:</label>";
-  content += "<input type='checkbox' id='useWiFi' name='useWiFi' " + String(settings.useWiFi ? "checked" : "") + "><br>";
-  content += "<label for='ssid'>SSID:</label>";
-  content += "<input type='text' id='ssid' name='ssid' value='" + settings.ssid + "'><br>";
-  content += "<label for='password'>Password:</label>";
-  content += "<input type='text' id='password' name='password' value='" + settings.password + "'><br>";
-  content += "<input type='submit' value='Save'>";
-  content += "</form>";
-  content += "<div class='warning'>";
-  content += "<p><strong>Warning:</strong> Please ensure that the settings on the node (number of pixels/universes) are the same as in your software to prevent errors.</p>";
-  content += "</div>";
-  content += "</body></html>";
+  String content = F("<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");  
+  content += F("<link rel=\"icon\" href=\"data:,\">");
+  content += F("<style>");
+  content += CSS_STYLES;
+  content += F("</style>");
+  content += F("<script>");
+  content += JS_CODE;
+  content += F("</script>");
+  content += F("</head>");
+  content += F("<body><h1>");
+  content += settings.nodeName;
+  content += F(" Configuration</h1>");
+  content += F("<form method='POST' action='/config'>");
+  
+  // Node settings
+  content += F("<label for='nodename'>Artnet Node name:</label>");
+  content += F("<input type='text' id='nodename' name='nodename' value='");
+  content += settings.nodeName;
+  content += F("'><br>");
+  
+  // LED settings
+  content += F("<label for='numledsoutput'>Number of LEDs per output (Max. 680):</label>");
+  content += F("<input type='text' id='numledsoutput' name='numledsoutput' value='");
+  content += String(settings.numLedsPerOutput);
+  content += F("'><br>");
+  
+  content += F("<label for='numoutput'>Number of outputs (Max. 4):</label>");
+  content += F("<input type='text' id='numoutput' name='numoutput' value='");
+  content += String(settings.numOutputs);
+  content += F("'><br>");
+  
+  content += F("<label for='startuniverse'>Start universe:</label>");
+  content += F("<input type='text' id='startuniverse' name='startuniverse' value='");
+  content += String(settings.startUniverse);
+  content += F("'><br>");
+  
+  // Brightness slider
+  content += F("<label for='ledbrightness'>Max. LED brightness:</label>");
+  content += F("<input type='range' id='ledbrightness' name='ledbrightness' min='0' max='255' value='");
+  content += String(settings.ledBrightness);
+  content += F("' oninput='brightnessValue.value=this.value'>");
+  content += F("<output id='brightnessValue'>");
+  content += String(settings.ledBrightness);
+  content += F("</output><br>");
+  
+  // Color settings
+  content += F("<label for='staticColor'>Static RGB Color (Hex):</label>");
+  content += F("<input type='color' id='staticColor' name='staticColor' value='");
+  content += settings.staticColor;
+  content += F("'><br>");
+  
+  content += F("<label for='enStatColor'>Enable Static Color:</label>");
+  content += F("<input type='checkbox' id='enStatColor' name='enStatColor' ");
+  content += settings.enStatColor ? F("checked") : F("");
+  content += F("><br>");
+  
+  content += F("<label for='ledCycleEnabled'>Enable RGB Test Cycle:</label>");
+  content += F("<input type='checkbox' id='ledCycleEnabled' name='ledCycleEnabled' ");
+  content += state.ledCycleEnabled ? F("checked") : F("");
+  content += F("><br>");
+  
+  // Custom pin configuration
+  content += F("<label for='enableCustomPins'>Enable Custom Pin Configuration:</label>");
+  content += F("<input type='checkbox' id='enableCustomPins' name='enableCustomPins' onchange='togglePinInputs()' ");
+  content += settings.enableCustomPins ? F("checked") : F("");
+  content += F("><br>");
+  
+  // Pin input fields
+  content += F("<div id='pin-container' class='pin-container' style='padding: 10px; margin-top: 10px; background-color: #f9f9f9; border-radius: 5px;'>");
+  for (int i = 0; i < NUMSTRIPS; i++) {
+    content += F("<div>");
+    content += F("<span class='pin-label'>Output ");
+    content += String(i+1);
+    content += F(" Pin:</span>");
+    content += F("<input type='number' class='pin-input' id='pin");
+    content += String(i);
+    content += F("' name='pin");
+    content += String(i);
+    content += F("' min='0' max='39' value='");
+    content += String(settings.pins[i]);
+    content += F("'>");
+    content += F("<span class='default-pin'>(Default: ");
+    content += String(DEFAULT_PINS[i]);
+    content += F(")</span></div>");
+  }
+  content += F("</div>");
+  
+  // Network settings
+  content += F("<label for='useWiFi'>Use Wi-Fi:</label>");
+  content += F("<input type='checkbox' id='useWiFi' name='useWiFi' ");
+  content += settings.useWiFi ? F("checked") : F("");
+  content += F("><br>");
+  
+  content += F("<label for='ssid'>SSID:</label>");
+  content += F("<input type='text' id='ssid' name='ssid' value='");
+  content += settings.ssid;
+  content += F("'><br>");
+  
+  content += F("<label for='password'>Password:</label>");
+  content += F("<input type='text' id='password' name='password' value='");
+  content += settings.password;
+  content += F("'><br>");
+  
+  // Submit button
+  content += F("<input type='submit' value='Save'>");
+  content += F("</form>");
+  
+  // Warning
+  content += F("<div class='warning'>");
+  content += F("<p><strong>Warning:</strong> Please ensure that the settings on the node (number of pixels/universes) are the same as in your software to prevent errors.</p>");
+  content += F("</div>");
+  content += F("</body></html>");
   
   server.send(200, "text/html", content);
 }
 
 /**
- * Handle configuration form submission
+ * Handle form submission
  */
 void handleConfig() {
   if (server.method() == HTTP_POST) {
@@ -526,17 +648,58 @@ void handleConfig() {
     state.ledCycleEnabled = server.hasArg("ledCycleEnabled");
     settings.enStatColor = server.hasArg("enStatColor");
     
+    // Handle custom pin configuration
+    bool wasCustomPinsEnabled = settings.enableCustomPins;
+    settings.enableCustomPins = server.hasArg("enableCustomPins");
+    
+    // Track if pins have changed
+    bool pinsChanged = false;
+    
+    // Reset pins if custom pins disabled
+    if (wasCustomPinsEnabled && !settings.enableCustomPins) {
+      resetToDefaultPins();
+      pinsChanged = true;
+    }
+    
+    // Update custom pin settings if enabled
+    if (settings.enableCustomPins) {
+      for (int i = 0; i < NUMSTRIPS; i++) {
+        String pinArg = "pin" + String(i);
+        if (server.hasArg(pinArg)) {
+          int newPin = server.arg(pinArg).toInt();
+          if (settings.pins[i] != newPin) {
+            settings.pins[i] = newPin;
+            pinsChanged = true;
+          }
+        }
+      }
+    }
+    
     state.isStaticColorSet = false;
 
     // Save settings to preferences
     saveSettings();
+    
+    // Apply new pin settings to the LED strips
+    if (pinsChanged) {
+      updateStripPins();
+      // Re-initialize LED driver with updated pins
+      driver.initled(ledData, settings.pins, NUMSTRIPS, NUM_LEDS_PER_STRIP);
+    }
+    
+    // Apply brightness
+    driver.setBrightness(settings.ledBrightness);
     
     // Redirect back to root page
     server.sendHeader("Location", "/", true);
     server.send(302, "text/plain", "");
     
     // Restart if needed
-    if (!state.ledCycleEnabled && !settings.enStatColor) {
+    bool networkSettingsChanged = server.hasArg("ssid") || server.hasArg("password") || 
+                                 server.hasArg("useWiFi"); 
+    
+    if (pinsChanged || networkSettingsChanged || (!state.ledCycleEnabled && !settings.enStatColor)) {
+      delay(500); // Give the browser time to receive the redirect response
       ESP.restart();
     }
   }
