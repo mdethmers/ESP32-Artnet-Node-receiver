@@ -1,6 +1,8 @@
 # ESP32-Artnet-Node-receiver
 
-![Image Description](https://github.com/mdethmers/ESP32-W5500-Artnet-receiver/blob/main/Img/Schermafbeelding%202024-09-26%20162838.png)
+![Image Description](https://github.com/mdethmers/ESP32-W5500-Artnet-receiver/blob/main/Img/Schermafbeelding%202025-05-13%20224004.png)
+
+
 
 NOW FOR SALE: https://www.etsy.com/nl/shop/LichtBit?ref=l2-about-shopname&from_page=listing
 
@@ -53,6 +55,7 @@ EasyEDA Editor: https://easyeda.com/editor#project_id=86fd5b1121594bfa85fd2c5eed
   - SPI.h, Wire.h (Built-in libraries for communication)
   - Adafruit_GFX.h (Graphics library for OLED)
   - Adafruit_SSD1306.h (OLED display driver)
+  - Update.h (OTA updates)
  
 # Configuration
 ## Access the Web Interface:
@@ -60,6 +63,12 @@ EasyEDA Editor: https://easyeda.com/editor#project_id=86fd5b1121594bfa85fd2c5eed
 - Set core debug level to "info" for extra infomration on performance
 - Find the IP address assigned to the ESP32 and open it in a web browser.
   - To find the IP address easily, use Resolume advanced output. It will autodetect the Artnet node.
+ 
+## OTA updates
+![Image Description](https://github.com/mdethmers/ESP32-W5500-Artnet-receiver/blob/main/Img/Schermafbeelding%202025-05-13%20224014.png)
+
+Upload the BIn file to your Node to have OTA updates. Easy when your node is in a hard to reach or remote place!
+
  
 ## Access the AP mode:
 - After 30 seconds without any Ethernet response, an AP mode will automatically launch
