@@ -35,6 +35,7 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <Update.h>
 
 // Default pin configuration
 const int DEFAULT_PINS[NUMSTRIPS] = {12, 14, 27, 26};
@@ -54,6 +55,9 @@ void resetToDefaultPins();
 void updateStripPins();
 void displayStatus(const String& line1, const String& line2 = "", const String& line3 = "", const String& line4 = "");
 void displayConnectionStatus(const String& type, int remainingTime = -1);
+void handleOTAUpdate();
+void handleDoUpdate();
+void printOTAProgress(size_t prg, size_t sz);
 
 // Configuration structure
 struct Settings {
@@ -69,6 +73,11 @@ struct Settings {
   String staticColor = "#000000";
   bool enStatColor = false;
   bool enableCustomPins = false;
+  bool ledCycleEnabled = false; 
+  bool useStaticIP = false;
+  String staticIP = "192.168.1.100";
+  String gateway = "192.168.1.1";
+  String subnet = "255.255.255.0";
 };
 
 // Runtime state
@@ -197,7 +206,7 @@ void loop() {
   if (settings.enStatColor && !state.isStaticColorSet) {
     applyStaticColor();
     state.isStaticColorSet = true;
-  } else if (state.ledCycleEnabled) {
+  } else if (settings.ledCycleEnabled) {
     cycleLEDs();
     state.isStaticColorSet = false;
   } else if (!settings.enStatColor) {
@@ -237,6 +246,11 @@ void loadSettings() {
   settings.staticColor = preferences.getString("staticColor", settings.staticColor);
   settings.enStatColor = preferences.getBool("enStatColor", settings.enStatColor);
   settings.enableCustomPins = preferences.getBool("enCustomPins", false);
+  settings.ledCycleEnabled = preferences.getBool("ledCycleEnabled", false);
+  settings.useStaticIP = preferences.getBool("useStaticIP", settings.useStaticIP);
+  settings.staticIP = preferences.getString("staticIP", settings.staticIP);
+  settings.gateway = preferences.getString("gateway", settings.gateway);
+  settings.subnet = preferences.getString("subnet", settings.subnet);
   
   // Load pins
   for (int i = 0; i < NUMSTRIPS; i++) {
@@ -281,6 +295,11 @@ void saveSettings() {
   preferences.putString("staticColor", settings.staticColor);
   preferences.putBool("enStatColor", settings.enStatColor);
   preferences.putBool("enCustomPins", settings.enableCustomPins);
+  preferences.putBool("ledCycleEnabled", settings.ledCycleEnabled);
+  preferences.putBool("useStaticIP", settings.useStaticIP);
+  preferences.putString("staticIP", settings.staticIP);
+  preferences.putString("gateway", settings.gateway);
+  preferences.putString("subnet", settings.subnet);
   
   // Save pins
   for (int i = 0; i < NUMSTRIPS; i++) {
@@ -339,6 +358,17 @@ void displayConnectionStatus(const String& type, int remainingTime) {
  * Set up WiFi connection
  */
 void setupWiFi() {
+  if (settings.useStaticIP) {
+    IPAddress ip, gateway, subnet;
+    if (ip.fromString(settings.staticIP) && 
+        gateway.fromString(settings.gateway) && 
+        subnet.fromString(settings.subnet)) {
+      WiFi.config(ip, gateway, subnet);
+    } else {
+      Serial.println("Invalid static IP configuration");
+    }
+  }
+
   WiFi.begin(settings.ssid.c_str(), settings.password.c_str());
   displayStatus("Connecting to Wi-Fi...");
   
@@ -356,6 +386,8 @@ void setupWiFi() {
       // Set up web server
       server.on("/", HTTP_GET, handleRoot);
       server.on("/config", HTTP_POST, handleConfig);
+      server.on("/update", HTTP_GET, handleOTAUpdate);
+      server.on("/doUpdate", HTTP_POST, handleOTAUpdateResponse, handleDoUpdate);
       server.begin();
       
       displayStatus("Wi-Fi connected", settings.ssid);
@@ -378,6 +410,19 @@ void setupEthernet() {
   
   ESP32_W5500_onEvent();
   ETH.begin(MISO_GPIO, MOSI_GPIO, SCK_GPIO, CS_GPIO, INT_GPIO, SPI_CLOCK_MHZ, ETH_SPI_HOST);
+
+  // Configure static IP if enabled
+  if (settings.useStaticIP) {
+    IPAddress ip, gateway, subnet;
+    if (ip.fromString(settings.staticIP) && 
+        gateway.fromString(settings.gateway) && 
+        subnet.fromString(settings.subnet)) {
+      ETH.config(ip, gateway, subnet);
+      Serial.println("Using static IP: " + settings.staticIP);
+    } else {
+      Serial.println("Invalid static IP configuration, using DHCP");
+    }
+  }
   
   while (millis() - state.startAttemptTime < CONNECTION_TIMEOUT) {
     int remainingTime = (CONNECTION_TIMEOUT - (millis() - state.startAttemptTime)) / 1000;
@@ -387,9 +432,12 @@ void setupEthernet() {
       // Set up web server routes
       server.on("/", HTTP_GET, handleRoot);
       server.on("/config", HTTP_POST, handleConfig);
+      server.on("/update", HTTP_GET, handleOTAUpdate);
+      server.on("/doUpdate", HTTP_POST, handleOTAUpdateResponse, handleDoUpdate);
       server.begin();
       
-      displayStatus("Ethernet connected", settings.nodeName);
+      displayStatus("Ethernet connected", 
+                    settings.useStaticIP ? "Static: " + settings.staticIP : "DHCP: " + ETH.localIP().toString());
       setStatusLED(0, 255, 0);
       return;
     }
@@ -417,6 +465,8 @@ void startAPMode() {
   // Set up web server
   server.on("/", HTTP_GET, handleRoot);
   server.on("/config", HTTP_POST, handleConfig);
+  server.on("/update", HTTP_GET, handleOTAUpdate);
+  server.on("/doUpdate", HTTP_POST, handleOTAUpdateResponse, handleDoUpdate);
   server.begin();
   
   // Set status LED to blue
@@ -503,8 +553,16 @@ function togglePinInputs() {
   var enableCustomPins = document.getElementById('enableCustomPins').checked;
   container.style.display = enableCustomPins ? 'block' : 'none';
 }
+
+function toggleStaticIP() {
+  var container = document.getElementById('static-ip-container');
+  var useStaticIP = document.getElementById('useStaticIP').checked;
+  container.style.display = useStaticIP ? 'block' : 'none';
+}
+
 window.onload = function() {
   togglePinInputs();
+  toggleStaticIP();
 };
 )";
 
@@ -567,10 +625,10 @@ void handleRoot() {
   content += F("<input type='checkbox' id='enStatColor' name='enStatColor' ");
   content += settings.enStatColor ? F("checked") : F("");
   content += F("><br>");
-  
+
   content += F("<label for='ledCycleEnabled'>Enable RGB Test Cycle:</label>");
   content += F("<input type='checkbox' id='ledCycleEnabled' name='ledCycleEnabled' ");
-  content += state.ledCycleEnabled ? F("checked") : F("");
+  content += settings.ledCycleEnabled ? F("checked") : F("");
   content += F("><br>");
   
   // Custom pin configuration
@@ -598,6 +656,29 @@ void handleRoot() {
     content += F(")</span></div>");
   }
   content += F("</div>");
+
+  // In handleRoot(), modify the static IP section:
+  content += F("<label for='useStaticIP'>Use Static IP:</label>");
+  content += F("<input type='checkbox' id='useStaticIP' name='useStaticIP' onchange='toggleStaticIP()' ");
+  content += settings.useStaticIP ? F("checked") : F("");
+  content += F("><br>");
+
+  content += F("<div id='static-ip-container' style='display: none;'>");
+  content += F("<label for='staticIP'>Static IP:</label>");
+  content += F("<input type='text' id='staticIP' name='staticIP' value='");
+  content += settings.staticIP;
+  content += F("' placeholder='192.168.1.100'><br>");
+
+  content += F("<label for='gateway'>Gateway:</label>");
+  content += F("<input type='text' id='gateway' name='gateway' value='");
+  content += settings.gateway;
+  content += F("' placeholder='192.168.1.1'><br>");
+
+  content += F("<label for='subnet'>Subnet Mask:</label>");
+  content += F("<input type='text' id='subnet' name='subnet' value='");
+  content += settings.subnet;
+  content += F("' placeholder='255.255.255.0'><br>");
+  content += F("</div>");
   
   // Network settings
   content += F("<label for='useWiFi'>Use Wi-Fi:</label>");
@@ -623,6 +704,12 @@ void handleRoot() {
   content += F("<div class='warning'>");
   content += F("<p><strong>Warning:</strong> Please ensure that the settings on the node (number of pixels/universes) are the same as in your software to prevent errors.</p>");
   content += F("</div>");
+
+  // Add OTA update link to the bottom of the root page
+  content += F("<div style='margin-top: 20px;'>");
+  content += F("<a href='/update' style='display: inline-block; background-color: #007bff; color: white; padding: 10px 15px; text-decoration: none; border-radius: 4px;'>Firmware Update</a>");
+  content += F("</div>");
+
   content += F("</body></html>");
   
   server.send(200, "text/html", content);
@@ -645,12 +732,17 @@ void handleConfig() {
     
     // Update boolean settings
     settings.useWiFi = server.hasArg("useWiFi");
-    state.ledCycleEnabled = server.hasArg("ledCycleEnabled");
+    settings.ledCycleEnabled = server.hasArg("ledCycleEnabled");
     settings.enStatColor = server.hasArg("enStatColor");
     
     // Handle custom pin configuration
     bool wasCustomPinsEnabled = settings.enableCustomPins;
     settings.enableCustomPins = server.hasArg("enableCustomPins");
+
+    settings.useStaticIP = server.hasArg("useStaticIP");
+    if (server.hasArg("staticIP")) settings.staticIP = server.arg("staticIP");
+    if (server.hasArg("gateway")) settings.gateway = server.arg("gateway");
+    if (server.hasArg("subnet")) settings.subnet = server.arg("subnet");    
     
     // Track if pins have changed
     bool pinsChanged = false;
@@ -676,7 +768,16 @@ void handleConfig() {
     }
     
     state.isStaticColorSet = false;
-
+    if (server.hasArg("ledCycleEnabled")) {
+      settings.ledCycleEnabled = true;
+      settings.enStatColor = false;  // Disable static color when enabling cycle
+    } else if (server.hasArg("enStatColor")) {
+      settings.enStatColor = true;
+      settings.ledCycleEnabled = false;  // Disable cycle when enabling static color
+    } else {
+      settings.ledCycleEnabled = false;
+      settings.enStatColor = false;
+    }
     // Save settings to preferences
     saveSettings();
     
@@ -696,11 +797,136 @@ void handleConfig() {
     
     // Restart if needed
     bool networkSettingsChanged = server.hasArg("ssid") || server.hasArg("password") || 
-                                 server.hasArg("useWiFi"); 
+                                 server.hasArg("useWiFi") || server.hasArg("useStaticIP") ||
+                                 server.hasArg("staticIP") || server.hasArg("gateway") ||
+                                 server.hasArg("subnet"); server.hasArg("staticIP");
     
     if (pinsChanged || networkSettingsChanged || (!state.ledCycleEnabled && !settings.enStatColor)) {
       delay(500); // Give the browser time to receive the redirect response
       ESP.restart();
     }
+  }
+}
+
+void handleOTAUpdate() {
+  String content = F("<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
+  content += F("<link rel=\"icon\" href=\"data:,\">");
+  content += F("<style>");
+  content += CSS_STYLES;
+  content += F("</style>");
+  content += F("</head>");
+  content += F("<body><h1>");
+  content += settings.nodeName;
+  content += F(" - OTA Update</h1>");
+  content += F("<form method='POST' action='/doUpdate' enctype='multipart/form-data'>");
+  content += F("<p>Select firmware .bin file to upload:</p>");
+  content += F("<input type='file' name='update' accept='.bin'><br><br>");
+  content += F("<input type='submit' value='Upload and Update'>");
+  content += F("</form>");
+  content += F("<div class='warning'>");
+  content += F("<p><strong>Warning:</strong> Uploading incorrect firmware may brick your device. Make sure to upload the correct binary file.</p>");
+  content += F("</div>");
+  content += F("<p><a href='/'>Return to configuration</a></p>");
+  content += F("</body></html>");
+  
+  server.send(200, "text/html", content);
+}
+
+/**
+ * Handle the actual firmware update
+ */
+void handleDoUpdate() {
+  // Check if file was uploaded
+  HTTPUpload& upload = server.upload();
+  
+  if (upload.status == UPLOAD_FILE_START) {
+    Serial.printf("Update: %s\n", upload.filename.c_str());
+    
+    // Display update status on OLED
+    displayStatus("OTA Update", "Starting...");
+    
+    // Set status LED to purple to indicate update in progress
+    setStatusLED(120, 0, 120);
+    
+    // Check if there's enough space for the update
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+      Update.printError(Serial);
+      displayStatus("OTA Update", "Failed!", "Not enough space");
+      setStatusLED(255, 0, 0); // Red for error
+    }
+  } else if (upload.status == UPLOAD_FILE_WRITE) {
+    // Write uploaded file data to flash
+    if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+      Update.printError(Serial);
+      displayStatus("OTA Update", "Failed!", "Write Error");
+      setStatusLED(255, 0, 0); // Red for error
+    } else {
+      // Update progress on OLED
+      float progress = (float)Update.progress() / (float)Update.size() * 100.0;
+      displayStatus("OTA Update", "Progress: " + String(progress, 1) + "%");
+    }
+  } else if (upload.status == UPLOAD_FILE_END) {
+    // Finish the update
+    if (Update.end(true)) {
+      Serial.printf("Update Success: %u bytes\n", upload.totalSize);
+      displayStatus("OTA Update", "Complete!", "Rebooting...");
+      setStatusLED(0, 255, 0); // Green for success
+    } else {
+      Update.printError(Serial);
+      displayStatus("OTA Update", "Failed!", "Verify Error");
+      setStatusLED(255, 0, 0); // Red for error
+    }
+  }
+  
+  yield();
+}
+
+/**
+ * Handle the OTA update response after upload completes
+ */
+void handleOTAUpdateResponse() {
+  if (Update.hasError()) {
+    String content = F("<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
+    content += F("<link rel=\"icon\" href=\"data:,\">");
+    content += F("<style>");
+    content += CSS_STYLES;
+    content += F("</style>");
+    content += F("</head>");
+    content += F("<body><h1>Update Failed!</h1>");
+    content += F("<p>The update failed to complete. Please try again.</p>");
+    content += F("<p><a href='/update'>Return to update page</a></p>");
+    content += F("</body></html>");
+    
+    server.send(200, "text/html", content);
+  } else {
+    String content = F("<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
+    content += F("<link rel=\"icon\" href=\"data:,\">");
+    content += F("<style>");
+    content += CSS_STYLES;
+    content += F("</style>");
+    content += F("<meta http-equiv=\"refresh\" content=\"5;url=/\" />");
+    content += F("<script>");
+    content += F("var countdown = 5;");
+    content += F("function updateCountdown() {");
+    content += F("  document.getElementById('seconds').textContent = countdown;");
+    content += F("  countdown--;");
+    content += F("  if (countdown < 0) {");
+    content += F("    document.getElementById('countdown').innerHTML = 'Redirecting...';");
+    content += F("  } else {");
+    content += F("    setTimeout(updateCountdown, 1000);");
+    content += F("  }");
+    content += F("}");
+    content += F("window.onload = updateCountdown;");
+    content += F("</script>");
+    content += F("</head>");
+    content += F("<body><h1>Update Successful!</h1>");
+    content += F("<p id='countdown'>Device will reboot and redirect to main page in <span id='seconds'>5</span> seconds...</p>");
+    content += F("</body></html>");
+    
+    server.send(200, "text/html", content);
+    
+    // Wait a moment for the client to get the response before rebooting
+    delay(1000);
+    ESP.restart();
   }
 }
