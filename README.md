@@ -8,9 +8,11 @@ This Artnet ESP32 LED controller is a high-performance, open-source solution for
 
 ## Features
 
+- 4 Outputs, 16 Universes in Total: Supports up to 4 LED strips with 4 universes per output, enabling large-scale LED installations.
 - Ethernet and Wi-Fi Support: Supports both wired and wireless Art-Net control for flexible connectivity.
 - AP Mode for Debugging: Easily configure the device in standalone mode without needing an external network.
-- 4 Outputs, 16 Universes in Total: Supports up to 4 LED strips with 4 universes per output, enabling large-scale LED installations.
+- Static IP option for permanent installations.
+- Over-The-Air (OTA) updates to update your node with different versions easily.
 - Configure the number of LEDs, outputs, start universe, and node name via a web interface.
 - High Frame Rates: Over 40 FPS, depending on the software used.
 - Reliable Performance: Boasts 99%+ reliability with less than 1% dropped frames.
