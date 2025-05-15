@@ -65,7 +65,7 @@ EasyEDA Editor: https://easyeda.com/editor#project_id=86fd5b1121594bfa85fd2c5eed
 ## OTA updates
 ![Image Description](https://github.com/mdethmers/ESP32-W5500-Artnet-receiver/blob/main/Img/Schermafbeelding%202025-05-13%20224014.png)
 
-Upload the BIn file to your Node to have OTA updates. Easy when your node is in a hard to reach or remote place!
+Upload the BIN file to your Node to have OTA updates. Easy when your node is in a hard to reach or remote place!
 
  
 ## Access the AP mode:
@@ -80,6 +80,9 @@ Important! Be sure that the Universes/outputs/leds always match with what you ou
 - Default status led is set to pin 16
 - i2c pins for oled is set to pin 21 and 22
 - default timeout is set to 30 sec
+
+### A note on direct ethernet connection between Node and PC
+Sadly the W5500 does not support Auto-MDI/MDIX, which means you need a crossover cable whenever you want to connect directly from your PC to the Node with an Ethernet cable!
 
 ## Open-Source Contributions
 This project is fully open-source! Feel free to contribute improvements, share your builds, and collaborate with the community.
