@@ -55,6 +55,13 @@ EasyEDA Editor: https://easyeda.com/editor#project_id=86fd5b1121594bfa85fd2c5eed
   - Adafruit_SSD1306.h (OLED display driver)
   - Update.h (OTA updates)
  
+## Supported LED ICs
+All LEDs based on the wsXXXX series are supported. These can be 3, 4 or even 5 channel LEDs, as long as they have  single data line and 800Khz timing. These include but are not limited to:
+  - WS2805, WS2811, WS2812, WS2813, WS2814, WS2815 (Tested)
+  - SK6812, SK6812W, SK6812-mini (Not tested)
+  - GS8208, TM1814, TM1829, UCS8904, UCS8903, FW1906 (Not tested
+  
+ 
 # Configuration
 ## Access the Web Interface:
 - After uploading the code, connect your ESP32 to a network using the W5500 Ethernet module.
