@@ -98,14 +98,14 @@ Sadly, the W5500 does not support Auto-MDI/MDIX, which means you need a crossove
 
 #Basic resolume setup example
 To get you up and running with your node, I provide a basic setup example for Resolume. Other software will work similarly.
-1 - Connect your node to a router (DHCP) or switch (Static IP) through Ethernet, wifi, or AP mode (192.168.4.1).
-2 - Once your node is successfully connected to your network, navigate to the configuration page (192.168.1.xxx) and set the Node's Name, Number of outputs, and MAXIMUM Leds you connect to your output.
-3 - (Optional) Enable the RGB test cycle or Static color to test if all ouputs and LEDs behave as expected. 
-4 - In Resolume, set the correct network adapter in Preferences>DMX.
-5 - In Resolume's advanced output, add a new Lumiverse and add the LED strips.  
-6 - In Resolume's advanced output, set the IP address. 
-7 - The node supports 4 universes (680 LEDS) per output. If you need all 16 universes (680 leds per output), add 4 Lumiverse outputs and set the right universes per output. For output 1 that is start universe 0, For output 2 that is start universe 4, For output 3 that is start universe 8, For output 4 that is start universe 12. Change this corresponding to the number of universes per output that you need. 
-8 - Your strips should now light up!
+1. Connect your node to a router (DHCP) or switch (Static IP) through Ethernet, wifi, or AP mode (192.168.4.1).
+2. Once your node is successfully connected to your network, navigate to the configuration page (192.168.1.xxx) and set the Node's Name, Number of outputs, and MAXIMUM Leds you connect to your output.
+3. Optional) Enable the RGB test cycle or Static color to test if all ouputs and LEDs behave as expected.
+4. In Resolume, set the correct network adapter in Preferences>DMX.
+5. In Resolume's advanced output, add a new Lumiverse and add the LED strips.
+6. In Resolume's advanced output, set the IP address.
+7. The node supports 4 universes (680 LEDS) per output. If you need all 16 universes (680 leds per output), add 4 Lumiverse outputs and set the right universes per output. For output 1 that is start universe 0, For output 2 that is start universe 4, For output 3 that is start universe 8, For output 4 that is start universe 12. Change this corresponding to the number of universes per output that you need.
+8. Your strips should now light up!
 
 ## Open-Source Contributions
 This project is fully open-source! Feel free to contribute improvements, share your builds, and collaborate with the community.
