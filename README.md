@@ -83,16 +83,29 @@ Upload the BIN file to your Node to have OTA updates. Easy when your node is in 
 - You can use this to connect to the Node and set up settings or a Wifi connection. 
 
 ## Configure the LED Controller:
-Important! Be sure that the Universes/outputs/leds always match with what you output. A mismatch can result in a black output. 
+Important! Be sure that the Universes/outputs/leds always match what you output. A mismatch can result in a black output. 
 
 ## Pin/Setting/Config info
-- Default led strip pins are 12, 14, 27, 26 (more outputs can be aded if necessary. change config accordingly)
-- Default status led is set to pin 16
-- i2c pins for oled is set to pin 21 and 22
-- default timeout is set to 30 sec
+- Default led strip pins are 12, 14, 27, 26 (more outputs can be added if necessary. Change config accordingly).
+- Default status led is set to pin 16.
+- Pin 16/17 can be reprogrammed for new functionality/adding more outputs. (They are connected to the 5v level shifter). 
+- I2C pins for OLED are set to pins 21 and 22.
+- The default timeout is set to 30 seconds.
+- There is a 5V switch Where the 12v regulator sits. Use this if you power the node with 5v Intead of 12V! The esp and other logic will be powered from the 5v power supply instead of the 12v to 5v regulator. 
 
-### A note on direct ethernet connection between Node and PC
-Sadly the W5500 does not support Auto-MDI/MDIX, which means you need a crossover cable whenever you want to connect directly from your PC to the Node with an Ethernet cable!
+### A note on direct Ethernet connection between Node and PC
+Sadly, the W5500 does not support Auto-MDI/MDIX, which means you need a crossover cable whenever you want to connect directly from your PC to the Node with an Ethernet cable!
+
+#Basic resolume setup example
+To get you up and running with your node, I provide a basic setup example for Resolume. Other software will work similarly.
+1 - Connect your node to a router (DHCP) or switch (Static IP) through Ethernet, wifi, or AP mode (192.168.4.1).
+2 - Once your node is successfully connected to your network, navigate to the configuration page (192.168.1.xxx) and set the Node's Name, Number of outputs, and MAXIMUM Leds you connect to your output.
+3 - (Optional) Enable the RGB test cycle or Static color to test if all ouputs and LEDs behave as expected. 
+4 - In Resolume, set the correct network adapter in Preferences>DMX.
+5 - In Resolume's advanced output, add a new Lumiverse and add the LED strips.  
+6 - In Resolume's advanced output, set the IP address. 
+7 - The node supports 4 universes (680 LEDS) per output. If you need all 16 universes (680 leds per output), add 4 Lumiverse outputs and set the right universes per output. For output 1 that is start universe 0, For output 2 that is start universe 4, For output 3 that is start universe 8, For output 4 that is start universe 12. Change this corresponding to the number of universes per output that you need. 
+8 - Your strips should now light up!
 
 ## Open-Source Contributions
 This project is fully open-source! Feel free to contribute improvements, share your builds, and collaborate with the community.
