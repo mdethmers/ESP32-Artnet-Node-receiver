@@ -1,6 +1,6 @@
 # ESP32-Artnet-Node-receiver
 
-![Image Description](https://github.com/mdethmers/ESP32-W5500-Artnet-receiver/blob/main/Img/Schermafbeelding%202025-05-13%20224004.png)
+![Image Description](https://github.com/mdethmers/ESP32-Artnet-Node-receiver/blob/main/Img/IMG_20250623_115355.jpg)
 
 This Artnet ESP32 LED controller is a high-performance, open-source solution for controlling addressable LEDs using Ethernet or Wi-Fi. This project allows you to control multiple LED strips using the Artnet protocol via an ESP32 microcontroller with a W5500 Ethernet module or ESP32-ETH01. The code includes a simple web server for configuration and control of the LED strips. For optimal performance, use the W5500 as the ETH01 suffers from performance issues. 
 
@@ -63,6 +63,9 @@ All LEDs based on the wsXXXX series are supported. These can be 3, 4 or even 5 c
   
  
 # Configuration
+
+![Image Description](https://github.com/mdethmers/ESP32-W5500-Artnet-receiver/blob/main/Img/Schermafbeelding%202025-05-13%20224004.png)
+
 ## Access the Web Interface:
 - After uploading the code, connect your ESP32 to a network using the W5500 Ethernet module.
 - Set core debug level to "info" for extra infomration on performance
