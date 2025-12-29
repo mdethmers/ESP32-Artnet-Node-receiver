@@ -37,6 +37,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Update.h>
+#include <WiFi.h>
 
 // Default pin configuration
 const int DEFAULT_PINS[NUMSTRIPS] = {12, 14, 27, 26};
@@ -60,7 +61,10 @@ void displayStatus(const String& line1, const String& line2 = "", const String& 
 void displayConnectionStatus(const String& type, int remainingTime = -1);
 void handleOTAUpdate();
 void handleDoUpdate();
+void handleOTAUpdateResponse();
 void printOTAProgress(size_t prg, size_t sz);
+void ESP32_W5500_event(arduino_event_id_t event);
+void ESP32_W5500_onEvent();
 
 // Configuration structure
 struct Settings {
@@ -96,7 +100,6 @@ struct State {
 };
 
 // Constants
-const unsigned long CONNECTION_TIMEOUT = 30000; // 30 seconds timeout
 const unsigned long CYCLE_DELAY = 1000;         // Change color every 1 second
 
 // Global objects
@@ -210,15 +213,53 @@ void loop() {
   checkBootButton();
 
   if (!state.isAPMode) {
-    bool networkDisconnected = (settings.networkMode == 1 && WiFi.status() != WL_CONNECTED) || 
-                             (settings.networkMode == 0 && (ETH.localIP() == INADDR_NONE));
+    static bool wasDisconnected = true;  // Start as true to detect initial connection
+    static bool lastConnectionState = false;  // Track previous connection state
+    bool networkDisconnected = false;
     
-    if (networkDisconnected) {
-      // Just wait for reconnection, or maybe blink LED?
-      // For now, we just let it be, as the user requested "no timeout"
-      // The setup functions loop until connected, but here in loop() we are already past setup.
-      // If connection drops, we might want to show it on display?
-      // But for now, just ensuring we don't switch to AP mode automatically.
+    if (settings.networkMode == 1) {
+      // WiFi mode
+      networkDisconnected = (WiFi.status() != WL_CONNECTED);
+    } else if (settings.networkMode == 0) {
+      // Ethernet mode - check IP address
+      networkDisconnected = (ETH.localIP() == INADDR_NONE);
+      bool currentlyConnected = !networkDisconnected;
+      
+      if (networkDisconnected) {
+        // Handle ethernet disconnection with blinking red LED
+        static unsigned long lastBlinkTime = 0;
+        
+        if (!wasDisconnected) {
+          // Just disconnected
+          Serial.println("Ethernet disconnected");
+          wasDisconnected = true;
+        }
+        
+        if (millis() - lastBlinkTime >= 500) {  // Blink every 500ms
+          lastBlinkTime = millis();
+          state.ledState = !state.ledState;
+          setStatusLED(state.ledState ? 255 : 0, 0, 0);  // Blinking red
+          
+          // Update display to show waiting for ethernet
+          displayStatus("Waiting for Ethernet");
+        }
+      } else {
+        // Connected - check if we just connected or reconnected
+        if (wasDisconnected || !lastConnectionState) {
+          setStatusLED(0, 255, 0);  // Green LED
+          
+          // Create display info with LEDs and outputs count
+          String ipInfo = settings.useStaticIP ? "Static: " + settings.staticIP : "DHCP: " + ETH.localIP().toString();
+          String ledsInfo = "LEDs:" + String(settings.numLedsPerOutput) + 
+                            " Out:" + String(settings.numOutputs);
+          
+          displayStatus(settings.nodeName, ipInfo, ledsInfo);
+          wasDisconnected = false;
+          Serial.println("Ethernet connected - IP: " + ETH.localIP().toString());
+        }
+      }
+      
+      lastConnectionState = currentlyConnected;
     }
   }
   
@@ -373,7 +414,7 @@ void displayStatus(const String& line1, const String& line2, const String& line3
  * Display connection status with timeout
  */
 void displayConnectionStatus(const String& type, int remainingTime) {
-  String line1 = "Connecting to " + type;
+  String line1 = "Waiting for " + type;
   String line2 = "";
   
   if (remainingTime >= 0) {
@@ -468,6 +509,7 @@ void setupEthernet() {
     }
   }
   
+  // Wait for ethernet connection and IP address
   while (ETH.localIP() == INADDR_NONE) {
     checkBootButton();
     
@@ -486,9 +528,8 @@ void setupEthernet() {
   server.on("/doUpdate", HTTP_POST, handleOTAUpdateResponse, handleDoUpdate);
   server.begin();
   
-  displayStatus("Ethernet connected", 
-                settings.useStaticIP ? "Static: " + settings.staticIP : "DHCP: " + ETH.localIP().toString());
-  setStatusLED(0, 255, 0);
+  // Connection established - display and LED will be updated by event handler
+  Serial.println("Ethernet setup complete");
 }
 
 /**
