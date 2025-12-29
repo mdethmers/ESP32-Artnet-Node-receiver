@@ -154,6 +154,16 @@ void setup() {
   // Update strip pins based on loaded settings
   updateStripPins();
   
+  // Set all LEDs to black (off) before initializing driver
+  for (int i = 0; i < settings.numOutputs; i++) {
+    strips[i].begin();
+    for (int j = 0; j < settings.numLedsPerOutput; j++) {
+      strips[i].setPixelColor(j, 0);  // Set to black (off)
+    }
+    strips[i].show();
+  }
+  Serial.println("All LEDs set to black");
+  
   // Initialize LED driver
   driver.initled(ledData, settings.pins, NUMSTRIPS, NUM_LEDS_PER_STRIP);
   driver.setBrightness(settings.ledBrightness);
