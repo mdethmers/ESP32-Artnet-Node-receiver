@@ -108,7 +108,8 @@ struct State {
 };
 
 // Preset colors for standalone static color mode
-const String presetColors[10] = {
+const int PRESET_COLORS_COUNT = 10;
+const String presetColors[PRESET_COLORS_COUNT] = {
   "#FF0000", // Red
   "#00FF00", // Green  
   "#0000FF", // Blue
@@ -620,7 +621,7 @@ void checkBootButton() {
             // Entering color selection mode - start blinking immediately
             Serial.println("Entering color selection mode");
             // Find current color index
-            for (int i = 0; i < 10; i++) {
+            for (int i = 0; i < PRESET_COLORS_COUNT; i++) {
               if (settings.staticColor == presetColors[i]) {
                 state.selectedColorIndex = i;
                 break;
