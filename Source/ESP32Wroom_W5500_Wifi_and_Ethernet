@@ -48,6 +48,7 @@ void setupEthernet();
 void setupEthernet();
 void startAPMode();
 void checkBootButton();
+void handleColorSelection();
 void cycleLEDs();
 void setStatusLED(uint8_t r, uint8_t g, uint8_t b);
 void applyStaticColor();
@@ -98,6 +99,26 @@ struct State {
   unsigned long lastUpdate = 0;
   unsigned long startAttemptTime = 0;
   bool ledState = false;
+  
+  // Color selection state for standalone static color mode
+  bool colorSelectionMode = false;
+  int selectedColorIndex = 0;
+  unsigned long lastBlinkTime = 0;
+  bool displayBlink = false;
+};
+
+// Preset colors for standalone static color mode
+const String presetColors[10] = {
+  "#FF0000", // Red
+  "#00FF00", // Green  
+  "#0000FF", // Blue
+  "#FFFF00", // Yellow
+  "#FF00FF", // Magenta
+  "#00FFFF", // Cyan
+  "#FFFFFF", // White
+  "#FF8000", // Orange
+  "#8000FF", // Purple
+  "#000000"  // Black/Off
 };
 
 // Constants
@@ -237,9 +258,17 @@ void loop() {
     // RGB Test or Static Color mode - no network, just LED patterns
     if (settings.networkMode == 3 && settings.ledCycleEnabled) {
       cycleLEDs();
-    } else if (settings.networkMode == 4 && settings.enStatColor && !state.isStaticColorSet) {
-      applyStaticColor();
-      state.isStaticColorSet = true;
+    } else if (settings.networkMode == 4) {
+      if (state.colorSelectionMode) {
+        // In color selection mode
+        handleColorSelection();
+      } else {
+        // Normal static color mode
+        if (settings.enStatColor && !state.isStaticColorSet) {
+          applyStaticColor();
+          state.isStaticColorSet = true;
+        }
+      }
     }
     return; // Skip all network handling
   }
@@ -531,57 +560,141 @@ void displayConnectionStatus(const String& type, int remainingTime) {
 }
 
 /**
+ * Handle color selection display and LED updates
+ */
+void handleColorSelection() {
+  // Handle blinking display
+  if (millis() - state.lastBlinkTime >= 500) {
+    state.lastBlinkTime = millis();
+    state.displayBlink = !state.displayBlink;
+    
+    if (state.displayBlink) {
+      // Show color info
+      displayStatus("Color Selection", 
+                    "Color: " + presetColors[state.selectedColorIndex]);
+    } else {
+      // Blank display for blink effect
+      displayStatus("", 
+                    "");
+    }
+  }
+  
+  // Update LEDs with selected color
+  uint32_t color = strtol(presetColors[state.selectedColorIndex].substring(1).c_str(), NULL, 16);
+  for (int i = 0; i < settings.numOutputs; i++) {
+    for (int j = 0; j < settings.numLedsPerOutput; j++) {
+      strips[i].setPixelColor(j, color);
+    }
+    strips[i].show();
+  }
+}
+
+/**
  * Check if boot button is pressed to switch mode
  */
 void checkBootButton() {
   if (digitalRead(BOOT_BUTTON_PIN) == LOW) {
     unsigned long pressTime = millis();
+    
+    // Wait for button release or long press threshold
     while(digitalRead(BOOT_BUTTON_PIN) == LOW) {
-      if (millis() - pressTime > 100) { // Debounce
-        // Cycle through 5 modes: 0=Ethernet, 1=WiFi, 2=AP, 3=RGB Test, 4=Static Color
-        settings.networkMode = (settings.networkMode + 1) % 5;
-        
-        // Update settings based on networkMode
-        switch (settings.networkMode) {
-          case 0: // Ethernet
-            settings.useWiFi = false;
-            settings.ledCycleEnabled = false;
-            settings.enStatColor = false;
-            displayStatus("Switching Mode...", "Ethernet");
-            break;
-            
-          case 1: // WiFi
-            settings.useWiFi = true;
-            settings.ledCycleEnabled = false;
-            settings.enStatColor = false;
-            displayStatus("Switching Mode...", "Wi-Fi");
-            break;
-            
-          case 2: // AP Mode
-            settings.useWiFi = false;
-            settings.ledCycleEnabled = false;
-            settings.enStatColor = false;
-            displayStatus("Switching Mode...", "AP Mode");
-            break;
-            
-          case 3: // RGB Test
-            // Keep current useWiFi setting, enable RGB test
-            settings.ledCycleEnabled = true;
-            settings.enStatColor = false;
-            displayStatus("Switching Mode...", "RGB Test Cycle");
-            break;
-            
-          case 4: // Static Color
-            // Keep current useWiFi setting, enable static color
-            settings.ledCycleEnabled = false;
-            settings.enStatColor = true;
-            displayStatus("Switching Mode...", "Static Color");
-            break;
+      unsigned long pressDuration = millis() - pressTime;
+      
+      // Long press (1000ms) - handle based on current mode
+      if (pressDuration > 1000) {
+        if (settings.networkMode == 4) {
+          // In standalone static color mode - toggle color selection
+          state.colorSelectionMode = !state.colorSelectionMode;
+          
+          if (state.colorSelectionMode) {
+            // Entering color selection mode
+            Serial.println("Entering color selection mode");
+            // Find current color index
+            for (int i = 0; i < 10; i++) {
+              if (settings.staticColor == presetColors[i]) {
+                state.selectedColorIndex = i;
+                break;
+              }
+            }
+          } else {
+            // Exiting color selection mode - save selected color
+            settings.staticColor = presetColors[state.selectedColorIndex];
+            saveSettings();
+            state.isStaticColorSet = false; // Force color update
+            Serial.println("Color saved: " + settings.staticColor);
+          }
+          
+          // Wait for button release
+          while(digitalRead(BOOT_BUTTON_PIN) == LOW) {
+            delay(10);
+          }
+          return;
+        } else {
+          // Normal mode switching for other modes
+          break; // Continue to mode switching logic
         }
-        
-        saveSettings();
-        delay(1000);
-        ESP.restart();
+      }
+      
+      delay(10);
+    }
+    
+    unsigned long pressDuration = millis() - pressTime;
+    
+    if (pressDuration > 100) {
+      // Short press - handle based on current mode
+      if (settings.networkMode == 4 && state.colorSelectionMode) {
+        // In color selection mode - cycle through colors
+        state.selectedColorIndex = (state.selectedColorIndex + 1) % 10;
+        state.isStaticColorSet = false; // Force color update
+        Serial.println("Selected color: " + presetColors[state.selectedColorIndex]);
+      } else {
+        // Normal mode switching for short press (except when in color selection)
+        if (!(settings.networkMode == 4 && state.colorSelectionMode)) {
+          // Cycle through 5 modes: 0=Ethernet, 1=WiFi, 2=AP, 3=RGB Test, 4=Static Color
+          settings.networkMode = (settings.networkMode + 1) % 5;
+          
+          // Update settings based on networkMode
+          switch (settings.networkMode) {
+            case 0: // Ethernet
+              settings.useWiFi = false;
+              settings.ledCycleEnabled = false;
+              settings.enStatColor = false;
+              displayStatus("Switching Mode...", "Ethernet");
+              break;
+              
+            case 1: // WiFi
+              settings.useWiFi = true;
+              settings.ledCycleEnabled = false;
+              settings.enStatColor = false;
+              displayStatus("Switching Mode...", "Wi-Fi");
+              break;
+              
+            case 2: // AP Mode
+              settings.useWiFi = false;
+              settings.ledCycleEnabled = false;
+              settings.enStatColor = false;
+              displayStatus("Switching Mode...", "AP Mode");
+              break;
+              
+            case 3: // RGB Test
+              // Keep current useWiFi setting, enable RGB test
+              settings.ledCycleEnabled = true;
+              settings.enStatColor = false;
+              displayStatus("Switching Mode...", "RGB Test Cycle");
+              break;
+              
+            case 4: // Static Color
+              // Keep current useWiFi setting, enable static color
+              settings.ledCycleEnabled = false;
+              settings.enStatColor = true;
+              displayStatus("Switching Mode...", "Static Color");
+              break;
+          }
+          
+          saveSettings();
+          delay(1000);
+          ESP.restart();
+        }
       }
     }
   }
