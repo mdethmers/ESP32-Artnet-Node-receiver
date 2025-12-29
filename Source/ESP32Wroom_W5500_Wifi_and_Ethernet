@@ -581,6 +581,16 @@ void handleColorSelection() {
   
   // Update LEDs with selected color
   uint32_t color = strtol(presetColors[state.selectedColorIndex].substring(1).c_str(), NULL, 16);
+  
+  // Extract RGB components for status LED
+  uint8_t r = (color >> 16) & 0xFF;
+  uint8_t g = (color >> 8) & 0xFF;
+  uint8_t b = color & 0xFF;
+  
+  // Set status LED to match the selected color
+  setStatusLED(r, g, b);
+  
+  // Apply to LED strips
   for (int i = 0; i < settings.numOutputs; i++) {
     for (int j = 0; j < settings.numLedsPerOutput; j++) {
       strips[i].setPixelColor(j, color);
@@ -607,7 +617,7 @@ void checkBootButton() {
           state.colorSelectionMode = !state.colorSelectionMode;
           
           if (state.colorSelectionMode) {
-            // Entering color selection mode
+            // Entering color selection mode - start blinking immediately
             Serial.println("Entering color selection mode");
             // Find current color index
             for (int i = 0; i < 10; i++) {
@@ -616,12 +626,23 @@ void checkBootButton() {
                 break;
               }
             }
+            // Start blinking immediately to show we entered selection mode
+            state.lastBlinkTime = millis();
+            state.displayBlink = true;
+            displayStatus("Color Selection", 
+                          "Color: " + presetColors[state.selectedColorIndex]);
           } else {
             // Exiting color selection mode - save selected color
             settings.staticColor = presetColors[state.selectedColorIndex];
             saveSettings();
             state.isStaticColorSet = false; // Force color update
             Serial.println("Color saved: " + settings.staticColor);
+            
+            // Stop blinking and ensure display is visible
+            state.displayBlink = false;
+            
+            // Show normal static color display immediately
+            displayStatus("Static Color Mode", "Color: " + settings.staticColor, "Press button to exit");
           }
           
           // Wait for button release
@@ -851,6 +872,16 @@ void applyStaticColor() {
   if (!settings.enStatColor) return;
   
   uint32_t color = strtol(settings.staticColor.substring(1).c_str(), NULL, 16);
+  
+  // Extract RGB components from hex color
+  uint8_t r = (color >> 16) & 0xFF;
+  uint8_t g = (color >> 8) & 0xFF;
+  uint8_t b = color & 0xFF;
+  
+  // Set status LED to match the static color
+  setStatusLED(r, g, b);
+  
+  // Apply to LED strips
   for (int i = 0; i < settings.numOutputs; i++) {
     for (int j = 0; j < settings.numLedsPerOutput; j++) {
       strips[i].setPixelColor(j, color);
