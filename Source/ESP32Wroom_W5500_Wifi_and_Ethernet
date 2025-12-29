@@ -57,8 +57,9 @@ void handleRoot();
 void handleConfig();
 void resetToDefaultPins();
 void updateStripPins();
-void displayStatus(const String& line1, const String& line2 = "", const String& line3 = "", const String& line4 = "");
+void displayStatus(const String& line1, const String& line2 = "", const String& line3 = "", const String& line4 = "", bool showWiFiIcon = false);
 void displayConnectionStatus(const String& type, int remainingTime = -1);
+void drawWiFiIcon(int x, int y);
 void handleOTAUpdate();
 void handleDoUpdate();
 void handleOTAUpdateResponse();
@@ -220,6 +221,44 @@ void loop() {
     if (settings.networkMode == 1) {
       // WiFi mode
       networkDisconnected = (WiFi.status() != WL_CONNECTED);
+      bool currentlyConnected = !networkDisconnected;
+      
+      if (networkDisconnected) {
+        // Handle WiFi disconnection with blinking red LED
+        static unsigned long lastBlinkTime = 0;
+        
+        if (!wasDisconnected) {
+          // Just disconnected
+          Serial.println("WiFi disconnected");
+          wasDisconnected = true;
+        }
+        
+        if (millis() - lastBlinkTime >= 500) {  // Blink every 500ms
+          lastBlinkTime = millis();
+          state.ledState = !state.ledState;
+          setStatusLED(state.ledState ? 255 : 0, 0, 0);  // Blinking red
+          
+          // Update display to show waiting for WiFi
+          displayStatus("Waiting for Wi-Fi");
+        }
+      } else {
+        // Connected - check if we just connected or reconnected
+        if (wasDisconnected || !lastConnectionState) {
+          setStatusLED(0, 255, 0);  // Green LED
+          
+          // Create display info with LEDs and outputs count
+          String ipInfo = "WiFi: " + WiFi.localIP().toString();
+          String ledsInfo = "LEDs:" + String(settings.numLedsPerOutput) + 
+                            " Out:" + String(settings.numOutputs);
+          
+          displayStatus(settings.nodeName, ipInfo, ledsInfo, "", true);  // Show WiFi icon
+          wasDisconnected = false;
+          Serial.println("WiFi connected - IP: " + WiFi.localIP().toString());
+        }
+      }
+      
+      lastConnectionState = currentlyConnected;
+      
     } else if (settings.networkMode == 0) {
       // Ethernet mode - check IP address
       networkDisconnected = (ETH.localIP() == INADDR_NONE);
@@ -382,9 +421,37 @@ void saveSettings() {
 }
 
 /**
- * Display multiple lines on the OLED screen
+ * Draw a simple WiFi icon at specified coordinates
  */
-void displayStatus(const String& line1, const String& line2, const String& line3, const String& line4) {
+void drawWiFiIcon(int x, int y) {
+  // Draw WiFi signal bars (simple 3-bar icon)
+  // Bar 1 (shortest)
+  display.drawPixel(x, y + 5, SSD1306_WHITE);
+  display.drawPixel(x, y + 6, SSD1306_WHITE);
+  display.drawPixel(x, y + 7, SSD1306_WHITE);
+  
+  // Bar 2 (medium)
+  display.drawPixel(x + 2, y + 3, SSD1306_WHITE);
+  display.drawPixel(x + 2, y + 4, SSD1306_WHITE);
+  display.drawPixel(x + 2, y + 5, SSD1306_WHITE);
+  display.drawPixel(x + 2, y + 6, SSD1306_WHITE);
+  display.drawPixel(x + 2, y + 7, SSD1306_WHITE);
+  
+  // Bar 3 (tallest)
+  display.drawPixel(x + 4, y + 1, SSD1306_WHITE);
+  display.drawPixel(x + 4, y + 2, SSD1306_WHITE);
+  display.drawPixel(x + 4, y + 3, SSD1306_WHITE);
+  display.drawPixel(x + 4, y + 4, SSD1306_WHITE);
+  display.drawPixel(x + 4, y + 5, SSD1306_WHITE);
+  display.drawPixel(x + 4, y + 6, SSD1306_WHITE);
+  display.drawPixel(x + 4, y + 7, SSD1306_WHITE);
+  
+}
+
+/**
+ * Display multiple lines on the OLED screen with optional WiFi icon
+ */
+void displayStatus(const String& line1, const String& line2, const String& line3, const String& line4, bool showWiFiIcon) {
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
@@ -405,6 +472,11 @@ void displayStatus(const String& line1, const String& line2, const String& line3
   if (line4.length() > 0) {
     display.setCursor(0, 27);
     display.println(line4);
+  }
+  
+  // Draw WiFi icon in bottom right if requested
+  if (showWiFiIcon) {
+    drawWiFiIcon(SCREEN_WIDTH - 8, SCREEN_HEIGHT - 10);
   }
   
   display.display();
