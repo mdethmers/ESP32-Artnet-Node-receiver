@@ -12,6 +12,7 @@ NOW FOR SALE: https://www.etsy.com/nl/shop/LichtBit?ref=l2-about-shopname&from_p
 - Ethernet and Wi-Fi Support: Supports both wired and wireless Art-Net control for flexible connectivity.
 - AP Mode for Debugging: Easily configure the device in standalone mode without needing an external network.
 - Static IP option for permanent installations.
+- Physical button for Mode switching
 - Over-The-Air (OTA) updates to update your node with different versions easily.
 - Configure the number of LEDs, outputs, start universe, and node name via a web interface.
 - High Frame Rates: Over 40 FPS, depending on the software used.
@@ -56,10 +57,12 @@ EasyEDA Editor: https://easyeda.com/editor#project_id=86fd5b1121594bfa85fd2c5eed
   - Update.h (OTA updates)
  
 ## Supported LED ICs
-All LEDs based on the wsXXXX series are supported. These can be 3, 4 or even 5 channel LEDs, as long as they have  single data line and 800Khz timing. These include but are not limited to:
+All LEDs based on the wsXXXX series are supported. These can be 3, 4 or even 5 channel LEDs (ARTNET ONLY FOR NOW), as long as they have  single data line and 800Khz timing. These include but are not limited to:
   - WS2805, WS2811, WS2812, WS2813, WS2814, WS2815 (Tested)
   - SK6812, SK6812W, SK6812-mini (Not tested)
-  - GS8208, TM1814, TM1829, UCS8904, UCS8903, FW1906 (Not tested
+  - GS8208, TM1814, TM1829, UCS8904, UCS8903, FW1906 (Not tested)
+
+Tests with SPI based leds like the APA102/107 are a work in progress, just like software support for 4 and 5 channel leds. Artnet works with 4/5 channel leds, but software support is coming!
   
  
 # Configuration
@@ -71,6 +74,29 @@ All LEDs based on the wsXXXX series are supported. These can be 3, 4 or even 5 c
 - Set core debug level to "info" for extra infomration on performance
 - Find the IP address assigned to the ESP32 and open it in a web browser.
   - To find the IP address easily, use Resolume advanced output. It will autodetect the Artnet node.
+ 
+## Mode switching with the Boot button
+The code allows you to use the boot button to switch between Ethernet, Wifi, AP, RGB Test cycle, and a static colour. In some of the modes, a long press allows you to change more settings by single pressing. Exit by long-pressing again.  
+- Ethernet > Long press > Switch between static IP / DCHP (Not implemented yet)
+- Wifi > Long press > Switch between static IP / DCHP (Not implemented yet)
+- RGB Test cycle > Long press > Switch to other test pattern (Not implemented yet)
+- Static colour > Long press > Switch between 10 different colours (WORKING!)
+
+Change this code with your own colours before compiling. 
+```
+const String presetColors[PRESET_COLORS_COUNT] = {
+  "#FF0000", // Red
+  "#00FF00", // Green  
+  "#0000FF", // Blue
+  "#FFFF00", // Yellow
+  "#FF00FF", // Magenta
+  "#00FFFF", // Cyan
+  "#FFFFFF", // White
+  "#FF8000", // Orange
+  "#8000FF", // Purple
+  "#000000"  // Black/Off
+};
+```
  
 ## OTA updates
 ![Image Description](https://github.com/mdethmers/ESP32-W5500-Artnet-receiver/blob/main/Img/Schermafbeelding%202025-05-13%20224014.png)
