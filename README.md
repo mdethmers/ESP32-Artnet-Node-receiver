@@ -6,6 +6,9 @@ This Artnet ESP32 LED controller is a high-performance, open-source solution for
 
 NOW FOR SALE: https://www.etsy.com/nl/shop/LichtBit?ref=l2-about-shopname&from_page=listing
 
+Soldering Tutorial: https://www.youtube.com/watch?v=-qxbHJJCwbM
+Node & Resolume Arena configuration: https://www.youtube.com/watch?v=1a7sWZTA7lg
+
 ## Features
 
 - 4 Outputs, 16 Universes in Total: Supports up to 4 LED strips with 4 universes per output, enabling large-scale LED installations.
