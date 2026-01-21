@@ -6,7 +6,9 @@ This Artnet ESP32 LED controller is a high-performance, open-source solution for
 
 NOW FOR SALE: https://www.etsy.com/nl/shop/LichtBit?ref=l2-about-shopname&from_page=listing
 
+### Videos & Tutorials
 Soldering Tutorial: https://www.youtube.com/watch?v=-qxbHJJCwbM
+
 Node & Resolume Arena configuration: https://www.youtube.com/watch?v=1a7sWZTA7lg
 
 ## Features
