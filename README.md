@@ -127,7 +127,7 @@ Important! Be sure that the Universes/outputs/leds always match what you output.
 ### A note on direct Ethernet connection between Node and PC
 Sadly, the W5500 does not support Auto-MDI/MDIX, which means you need a crossover cable whenever you want to connect directly from your PC to the Node with an Ethernet cable!
 
-#Basic resolume setup example
+# Basic resolume setup example
 To get you up and running with your node, I provide a basic setup example for Resolume. Other software will work similarly.
 1. Connect your node to a router (DHCP) or switch (Static IP) through Ethernet, wifi, or AP mode (192.168.4.1).
 2. Once your node is successfully connected to your network, navigate to the configuration page (192.168.1.xxx) and set the Node's Name, Number of outputs, and MAXIMUM Leds you connect to your output.
