@@ -613,7 +613,31 @@ void checkBootButton() {
       
       // Long press (1000ms) - handle based on current mode
       if (pressDuration > 1000) {
-        if (settings.networkMode == 4) {
+        Serial.println("long press triggered");
+        if (settings.networkMode == 0) {
+          // In Ethernet mode - toggle between Static IP and DHCP
+          Serial.println("toggle between Static IP and DHCP");
+          settings.useStaticIP = !settings.useStaticIP;
+          saveSettings();
+          
+          // Show feedback on display
+          if (settings.useStaticIP) {
+            displayStatus("Switching to", "Static IP", settings.staticIP);
+            Serial.println("Switching to Static IP: " + settings.staticIP);
+          } else {
+            displayStatus("Switching to", "DHCP");
+            Serial.println("Switching to DHCP");
+          }
+          
+          // Wait for button release
+          while(digitalRead(BOOT_BUTTON_PIN) == LOW) {
+            delay(10);
+          }
+          
+          delay(1000);
+          ESP.restart();
+          return;
+        } else if (settings.networkMode == 4) {
           // In standalone static color mode - toggle color selection
           state.colorSelectionMode = !state.colorSelectionMode;
           
