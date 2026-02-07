@@ -983,6 +983,13 @@ input[type='submit']:hover { background-color: #45a049; }
 .pin-input { width: 60px !important; display: inline-block; margin-right: 10px; }
 .pin-container { margin: 10px 0; }
 .pin-label { display: inline-block; width: 100px; text-align: left; }
+.radio-group { display: flex; justify-content: center; gap: 20px; margin: 10px 0; }
+.radio-option { display: flex; align-items: center; gap: 5px; }
+.radio-option input[type='radio'] { margin: 0; }
+.slider-container { margin: 15px 0; }
+.slider-value { display: inline-block; min-width: 50px; text-align: center; font-weight: bold; }
+input[type='range'] { width: 70%; }
+)
 .default-pin { color: #666; font-size: 0.9em; margin-left: 5px; }
 )";
 
@@ -1002,27 +1009,56 @@ function toggleStaticIP() {
   container.style.display = useStaticIP ? 'block' : 'none';
 }
 
-function toggleRGBW() {
-  var container = document.getElementById('rgbw-container');
-  var useRGBW = document.getElementById('useRGBW').checked;
-  container.style.display = useRGBW ? 'block' : 'none';
+function updateChannelMode() {
+  var isRGBW = document.querySelector('input[name="channelMode"]:checked').value === '4';
+  var whiteLevelContainer = document.getElementById('white-level-container');
+  var staticColorEnabled = document.getElementById('enStatColor').checked;
   
-  // Update max LEDs label and info
-  var maxLedsLabel = document.getElementById('maxLedsLabel');
-  var numLedsInput = document.getElementById('numledsoutput');
-  var maxLeds = useRGBW ? 512 : 680;  // RGBW: 128×4 universes=512, RGB: 170×4 universes=680
-  maxLedsLabel.textContent = maxLeds;
+  // Show white level only if RGBW mode AND static color is enabled
+  whiteLevelContainer.style.display = (isRGBW && staticColorEnabled) ? 'block' : 'none';
   
-  // Adjust current value if it exceeds new max
-  if (parseInt(numLedsInput.value) > maxLeds) {
-    numLedsInput.value = maxLeds;
-  }
+  // Update LED universe slider
+  updateUniverseSlider();
+}
+
+function updateStaticColorState() {
+  var isRGBW = document.querySelector('input[name="channelMode"]:checked').value === '4';
+  var staticColorEnabled = document.getElementById('enStatColor').checked;
+  var whiteLevelContainer = document.getElementById('white-level-container');
+  
+  // Show white level only if RGBW mode AND static color is enabled
+  whiteLevelContainer.style.display = (isRGBW && staticColorEnabled) ? 'block' : 'none';
+}
+
+function updateUniverseSlider() {
+  var isRGBW = document.querySelector('input[name="channelMode"]:checked').value === '4';
+  var slider = document.getElementById('numLedsSlider');
+  var output = document.getElementById('numLedsValue');
+  var hiddenInput = document.getElementById('numledsoutput');
+  
+  var universes = parseInt(slider.value);
+  var ledsPerUniverse = isRGBW ? 128 : 170;
+  var totalLeds = universes * ledsPerUniverse;
+  
+  output.textContent = universes + ' universe' + (universes > 1 ? 's' : '') + ' (' + totalLeds + ' LEDs)';
+  hiddenInput.value = totalLeds;
+}
+
+function updateOutputSlider() {
+  var slider = document.getElementById('numOutputSlider');
+  var output = document.getElementById('numOutputValue');
+  var hiddenInput = document.getElementById('numoutput');
+  
+  output.textContent = slider.value;
+  hiddenInput.value = slider.value;
 }
 
 window.onload = function() {
   togglePinInputs();
   toggleStaticIP();
-  toggleRGBW();
+  updateChannelMode();
+  updateUniverseSlider();
+  updateOutputSlider();
 };
 )";
 
@@ -1050,19 +1086,51 @@ void handleRoot() {
   content += settings.nodeName;
   content += F("'><br>");
   
-  // LED settings
-  int maxLeds = settings.useRGBW ? MAX_LEDS_RGBW : MAX_LEDS_RGB;
-  content += F("<label for='numledsoutput'>Number of LEDs per output (Max. <span id='maxLedsLabel'>");
-  content += String(maxLeds);
-  content += F("</span>):</label>");
-  content += F("<input type='text' id='numledsoutput' name='numledsoutput' value='");
-  content += String(settings.numLedsPerOutput);
-  content += F("'><br>");
+  // Channel mode selection (RGB vs RGBW)
+  content += F("<label>LED Channel Mode:</label>");
+  content += F("<div class='radio-group'>");
+  content += F("<div class='radio-option'>");
+  content += F("<input type='radio' id='rgb3ch' name='channelMode' value='3' onchange='updateChannelMode()' ");
+  content += !settings.useRGBW ? F("checked") : F("");
+  content += F("><label for='rgb3ch'>RGB (3 channels)</label>");
+  content += F("</div>");
+  content += F("<div class='radio-option'>");
+  content += F("<input type='radio' id='rgbw4ch' name='channelMode' value='4' onchange='updateChannelMode()' ");
+  content += settings.useRGBW ? F("checked") : F("");
+  content += F("><label for='rgbw4ch'>RGBW (4 channels)</label>");
+  content += F("</div>");
+  content += F("</div>");
   
-  content += F("<label for='numoutput'>Number of outputs (Max. 4):</label>");
-  content += F("<input type='text' id='numoutput' name='numoutput' value='");
+  // LED universes slider
+  int ledsPerUniverse = settings.useRGBW ? 128 : 170;
+  int currentUniverses = (settings.numLedsPerOutput + ledsPerUniverse - 1) / ledsPerUniverse; // Round up
+  if (currentUniverses < 1) currentUniverses = 1;
+  if (currentUniverses > 4) currentUniverses = 4;
+  
+  content += F("<div class='slider-container'>");
+  content += F("<label for='numLedsSlider'>LEDs per output:</label><br>");
+  content += F("<input type='range' id='numLedsSlider' min='1' max='4' step='1' value='");
+  content += String(currentUniverses);
+  content += F("' oninput='updateUniverseSlider()'>");
+  content += F("<span class='slider-value' id='numLedsValue'></span>");
+  content += F("<input type='hidden' id='numledsoutput' name='numledsoutput' value='");
+  content += String(settings.numLedsPerOutput);
+  content += F("'>");
+  content += F("</div>");
+  
+  // Number of outputs slider
+  content += F("<div class='slider-container'>");
+  content += F("<label for='numOutputSlider'>Number of outputs:</label><br>");
+  content += F("<input type='range' id='numOutputSlider' min='1' max='4' step='1' value='");
   content += String(settings.numOutputs);
-  content += F("'><br>");
+  content += F("' oninput='updateOutputSlider()'>");
+  content += F("<span class='slider-value' id='numOutputValue'>");
+  content += String(settings.numOutputs);
+  content += F("</span>");
+  content += F("<input type='hidden' id='numoutput' name='numoutput' value='");
+  content += String(settings.numOutputs);
+  content += F("'>");
+  content += F("</div>");
   
   content += F("<label for='startuniverse'>Start universe:</label>");
   content += F("<input type='text' id='startuniverse' name='startuniverse' value='");
@@ -1070,30 +1138,14 @@ void handleRoot() {
   content += F("'><br>");
   
   // Brightness slider
-  content += F("<label for='ledbrightness'>Max. LED brightness:</label>");
+  content += F("<div class='slider-container'>");
+  content += F("<label for='ledbrightness'>Max. LED brightness:</label><br>");
   content += F("<input type='range' id='ledbrightness' name='ledbrightness' min='0' max='255' value='");
   content += String(settings.ledBrightness);
   content += F("' oninput='brightnessValue.value=this.value'>");
-  content += F("<output id='brightnessValue'>");
+  content += F("<span class='slider-value'><output id='brightnessValue'>");
   content += String(settings.ledBrightness);
-  content += F("</output><br>");
-  
-  // RGBW configuration
-  content += F("<label for='useRGBW'>Use RGBW LEDs (4 channels):</label>");
-  content += F("<input type='checkbox' id='useRGBW' name='useRGBW' onchange='toggleRGBW()' ");
-  content += settings.useRGBW ? F("checked") : F("");
-  content += F("><br>");
-  
-  content += F("<div id='rgbw-container' style='display: ");
-  content += settings.useRGBW ? F("block") : F("none");
-  content += F(";'>");
-  content += F("<label for='whiteLevel'>White Channel Level:</label>");
-  content += F("<input type='range' id='whiteLevel' name='whiteLevel' min='0' max='255' value='");
-  content += String(settings.whiteLevel);
-  content += F("' oninput='whiteLevelValue.value=this.value'>");
-  content += F("<output id='whiteLevelValue'>");
-  content += String(settings.whiteLevel);
-  content += F("</output><br>");
+  content += F("</output></span>");
   content += F("</div>");
   
   // Color settings
@@ -1103,9 +1155,24 @@ void handleRoot() {
   content += F("'><br>");
   
   content += F("<label for='enStatColor'>Enable Static Color:</label>");
-  content += F("<input type='checkbox' id='enStatColor' name='enStatColor' ");
+  content += F("<input type='checkbox' id='enStatColor' name='enStatColor' onchange='updateStaticColorState()' ");
   content += settings.enStatColor ? F("checked") : F("");
   content += F("><br>");
+  
+  // White level (only for RGBW + static color)
+  content += F("<div id='white-level-container' style='display: ");
+  content += (settings.useRGBW && settings.enStatColor) ? F("block") : F("none");
+  content += F(";'>");
+  content += F("<div class='slider-container'>");
+  content += F("<label for='whiteLevel'>White Channel Level:</label><br>");
+  content += F("<input type='range' id='whiteLevel' name='whiteLevel' min='0' max='255' value='");
+  content += String(settings.whiteLevel);
+  content += F("' oninput='whiteLevelValue.value=this.value'>");
+  content += F("<span class='slider-value'><output id='whiteLevelValue'>");
+  content += String(settings.whiteLevel);
+  content += F("</output></span>");
+  content += F("</div>");
+  content += F("</div>");
 
   content += F("<label for='ledCycleEnabled'>Enable RGB Test Cycle:</label>");
   content += F("<input type='checkbox' id='ledCycleEnabled' name='ledCycleEnabled' ");
@@ -1212,22 +1279,24 @@ void handleConfig() {
     if (server.hasArg("staticColor")) settings.staticColor = server.arg("staticColor");
     if (server.hasArg("whiteLevel")) settings.whiteLevel = server.arg("whiteLevel").toInt();
     
+    // Handle channel mode (RGB vs RGBW)
+    if (server.hasArg("channelMode")) {
+      bool wasRGBW = settings.useRGBW;
+      settings.useRGBW = (server.arg("channelMode") == "4");
+      
+      // If mode changed, enforce LED count limits
+      if (wasRGBW != settings.useRGBW) {
+        int maxLeds = getMaxLedsPerStrip();
+        if (settings.numLedsPerOutput > maxLeds) {
+          settings.numLedsPerOutput = maxLeds;
+        }
+      }
+    }
+    
     // Update boolean settings
     settings.useWiFi = server.hasArg("useWiFi");
     settings.ledCycleEnabled = server.hasArg("ledCycleEnabled");
     settings.enStatColor = server.hasArg("enStatColor");
-    
-    // Handle RGBW mode change
-    bool wasRGBW = settings.useRGBW;
-    settings.useRGBW = server.hasArg("useRGBW");
-    
-    // If RGBW mode changed, enforce LED count limits
-    if (wasRGBW != settings.useRGBW) {
-      int maxLeds = getMaxLedsPerStrip();
-      if (settings.numLedsPerOutput > maxLeds) {
-        settings.numLedsPerOutput = maxLeds;
-      }
-    }
     
     // Update networkMode to match useWiFi setting
     if (settings.useWiFi) {
