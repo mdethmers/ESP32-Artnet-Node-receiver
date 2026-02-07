@@ -992,6 +992,7 @@ const char* const CSS_STYLES = R"(
   --button-hover: #45a049;
   --accent-color: #007bff;
   --warning-color: #d9534f;
+  --muted-text: #666;
 }
 body.dark-mode {
   --bg-color: #1a1a1a;
@@ -1003,6 +1004,7 @@ body.dark-mode {
   --button-hover: #ff7700;
   --accent-color: #ff8c00;
   --warning-color: #ff6b6b;
+  --muted-text: #999;
 }
 body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: var(--bg-color); color: var(--text-color); text-align: center; transition: background-color 0.3s, color 0.3s; }
 h1 { font-size: 24px; margin-bottom: 20px; }
@@ -1023,7 +1025,7 @@ input[type='submit']:hover { background-color: var(--button-hover); }
 .slider-value { display: inline-block; min-width: 50px; text-align: center; font-weight: bold; }
 input[type='range'] { width: 70%; }
 a { color: var(--accent-color); transition: color 0.3s; }
-.default-pin { color: #666; font-size: 0.9em; margin-left: 5px; }
+.default-pin { color: var(--muted-text); font-size: 0.9em; margin-left: 5px; transition: color 0.3s; }
 )";
 
 /**
@@ -1236,7 +1238,7 @@ void handleRoot() {
   content += F("><br>");
   
   // Pin input fields
-  content += F("<div id='pin-container' class='pin-container' style='padding: 10px; margin-top: 10px; background-color: #f9f9f9; border-radius: 5px;'>");
+  content += F("<div id='pin-container' class='pin-container'>");
   for (int i = 0; i < NUMSTRIPS; i++) {
     content += F("<div>");
     content += F("<span class='pin-label'>Output ");
