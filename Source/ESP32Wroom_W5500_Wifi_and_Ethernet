@@ -10,11 +10,11 @@
 #define UNIQUE_SUBARTNET
 
 // LED configuration
-#define MAX_LEDS_RGB 680              // Maximum LEDs for RGB (3 channels)
-#define MAX_LEDS_RGBW 510             // Maximum LEDs for RGBW (4 channels)
-#define NUM_LEDS_PER_STRIP MAX_LEDS_RGB  // For I2SClocklessLedDriver library compatibility
+#define MAX_LEDS_RGB 680              // Maximum LEDs for RGB (170 × 4 universes = 680 LEDs, 510 channels per universe)
+#define MAX_LEDS_RGBW 512             // Maximum LEDs for RGBW (128 × 4 universes = 512 LEDs, 512 channels per universe)
+#define NUM_LEDS_PER_STRIP 680        // For I2SClocklessLedDriver library compatibility (max across all strips)
 #define NUMSTRIPS 4                   // Maximum number of LED strips
-#define UNIVERSE_SIZE_IN_CHANNEL 510  // Size of a universe (170 pixels * 3 channels for RGB, 127 for RGBW)
+#define UNIVERSE_SIZE_IN_CHANNEL 512  // Standard ArtNet universe size
 #define COLOR_RBG                     // Define color order (Green-Red-Blue)
 
 // Hardware configuration
@@ -71,7 +71,7 @@ void ESP32_W5500_onEvent();
 
 // Configuration structure
 struct Settings {
-  int numLedsPerOutput = 680;
+  int numLedsPerOutput = 680;  // Default to RGB max (680 LEDs across 4 universes)
   int numOutputs = 4;
   int startUniverse = 0;
   int pins[NUMSTRIPS] = {12, 14, 27, 26};
@@ -136,8 +136,10 @@ Preferences preferences;
 artnetESP32V2 artnet = artnetESP32V2();
 I2SClocklessLedDriver driver;
 
-// LED storage - allocate for maximum size (4 channels * 4 strips * 680 LEDs)
-uint8_t ledData[4 * NUMSTRIPS * MAX_LEDS_RGB];
+// LED storage - allocate for maximum size to support both RGB and RGBW
+// RGB: 680 LEDs × 3 channels × 4 strips = 8,160 bytes
+// RGBW: 512 LEDs × 4 channels × 4 strips = 8,192 bytes
+uint8_t ledData[4 * NUMSTRIPS * MAX_LEDS_RGB];  // 10,880 bytes (allows for dynamic configuration)
 
 // Settings and state
 Settings settings;
@@ -1005,10 +1007,10 @@ function toggleRGBW() {
   var useRGBW = document.getElementById('useRGBW').checked;
   container.style.display = useRGBW ? 'block' : 'none';
   
-  // Update max LEDs label
+  // Update max LEDs label and info
   var maxLedsLabel = document.getElementById('maxLedsLabel');
   var numLedsInput = document.getElementById('numledsoutput');
-  var maxLeds = useRGBW ? 510 : 680;
+  var maxLeds = useRGBW ? 512 : 680;  // RGBW: 128×4 universes=512, RGB: 170×4 universes=680
   maxLedsLabel.textContent = maxLeds;
   
   // Adjust current value if it exceeds new max
