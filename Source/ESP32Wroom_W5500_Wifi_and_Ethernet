@@ -10,10 +10,11 @@
 #define UNIQUE_SUBARTNET
 
 // LED configuration
-#define NUM_LEDS_PER_STRIP 680        // Maximum number of LEDs per strip
+#define MAX_LEDS_RGB 680              // Maximum LEDs for RGB (3 channels)
+#define MAX_LEDS_RGBW 510             // Maximum LEDs for RGBW (4 channels)
+#define NUM_LEDS_PER_STRIP MAX_LEDS_RGB  // For I2SClocklessLedDriver library compatibility
 #define NUMSTRIPS 4                   // Maximum number of LED strips
-#define NB_CHANNEL_PER_LED 3          // Number of channels per LED (3 for RGB, 4 for RGBW)
-#define UNIVERSE_SIZE_IN_CHANNEL 510  // Size of a universe (170 pixels * 3 channels)
+#define UNIVERSE_SIZE_IN_CHANNEL 510  // Size of a universe (170 pixels * 3 channels for RGB, 127 for RGBW)
 #define COLOR_RBG                     // Define color order (Green-Red-Blue)
 
 // Hardware configuration
@@ -88,6 +89,8 @@ struct Settings {
   String gateway = "192.168.1.1";
   String subnet = "255.255.255.0";
   int networkMode = 0; // 0: Ethernet, 1: WiFi, 2: AP
+  bool useRGBW = false; // false = RGB (3 channels), true = RGBW (4 channels)
+  int whiteLevel = 0; // White channel level for RGBW (0-255)
 };
 
 // Runtime state
@@ -133,19 +136,28 @@ Preferences preferences;
 artnetESP32V2 artnet = artnetESP32V2();
 I2SClocklessLedDriver driver;
 
-// LED storage
-uint8_t ledData[NB_CHANNEL_PER_LED * NUMSTRIPS * NUM_LEDS_PER_STRIP];
+// LED storage - allocate for maximum size (4 channels * 4 strips * 680 LEDs)
+uint8_t ledData[4 * NUMSTRIPS * MAX_LEDS_RGB];
 
 // Settings and state
 Settings settings;
 State state;
 
-// LED strip objects
+// Helper functions to get current LED configuration
+int getMaxLedsPerStrip() {
+  return settings.useRGBW ? MAX_LEDS_RGBW : MAX_LEDS_RGB;
+}
+
+int getChannelsPerLed() {
+  return settings.useRGBW ? 4 : 3;
+}
+
+// LED strip objects - will be reconfigured in setup based on RGB/RGBW setting
 Adafruit_NeoPixel strips[NUMSTRIPS] = {
-  Adafruit_NeoPixel(NUM_LEDS_PER_STRIP, DEFAULT_PINS[0], NEO_BRG + NEO_KHZ800),
-  Adafruit_NeoPixel(NUM_LEDS_PER_STRIP, DEFAULT_PINS[1], NEO_BRG + NEO_KHZ800),
-  Adafruit_NeoPixel(NUM_LEDS_PER_STRIP, DEFAULT_PINS[2], NEO_BRG + NEO_KHZ800),
-  Adafruit_NeoPixel(NUM_LEDS_PER_STRIP, DEFAULT_PINS[3], NEO_BRG + NEO_KHZ800)
+  Adafruit_NeoPixel(MAX_LEDS_RGB, DEFAULT_PINS[0], NEO_BRG + NEO_KHZ800),
+  Adafruit_NeoPixel(MAX_LEDS_RGB, DEFAULT_PINS[1], NEO_BRG + NEO_KHZ800),
+  Adafruit_NeoPixel(MAX_LEDS_RGB, DEFAULT_PINS[2], NEO_BRG + NEO_KHZ800),
+  Adafruit_NeoPixel(MAX_LEDS_RGB, DEFAULT_PINS[3], NEO_BRG + NEO_KHZ800)
 };
 
 // ArtNet callback function
@@ -173,6 +185,20 @@ void setup() {
   // Load settings from preferences
   loadSettings();
   
+  // Enforce LED count limits based on RGB/RGBW mode
+  int maxLeds = getMaxLedsPerStrip();
+  if (settings.numLedsPerOutput > maxLeds) {
+    settings.numLedsPerOutput = maxLeds;
+    saveSettings();
+  }
+  
+  // Reconfigure LED strips based on RGB/RGBW setting
+  uint16_t pixelType = settings.useRGBW ? (NEO_GRBW + NEO_KHZ800) : (NEO_BRG + NEO_KHZ800);
+  for (int i = 0; i < NUMSTRIPS; i++) {
+    strips[i].updateType(pixelType);
+    strips[i].updateLength(settings.numLedsPerOutput);
+  }
+  
   // Update strip pins based on loaded settings
   updateStripPins();
   
@@ -187,7 +213,7 @@ void setup() {
   Serial.println("All LEDs set to black");
   
   // Initialize LED driver
-  driver.initled(ledData, settings.pins, NUMSTRIPS, NUM_LEDS_PER_STRIP);
+  driver.initled(ledData, settings.pins, NUMSTRIPS, settings.numLedsPerOutput);
   driver.setBrightness(settings.ledBrightness);
   
   // Initialize networking
@@ -232,9 +258,10 @@ void setup() {
     displayStatus(settings.nodeName, ipStr, ledsInfo);
     
     // Initialize ArtNet
+    int channelsPerLed = getChannelsPerLed();
     artnet.addSubArtnet(
       settings.startUniverse, 
-      settings.numLedsPerOutput * settings.numOutputs * NB_CHANNEL_PER_LED, 
+      settings.numLedsPerOutput * settings.numOutputs * channelsPerLed, 
       UNIVERSE_SIZE_IN_CHANNEL, 
       &displayfunction
     );
@@ -417,6 +444,8 @@ void loadSettings() {
   settings.gateway = preferences.getString("gateway", settings.gateway);
   settings.subnet = preferences.getString("subnet", settings.subnet);
   settings.networkMode = preferences.getInt("networkMode", -1);
+  settings.useRGBW = preferences.getBool("useRGBW", settings.useRGBW);
+  settings.whiteLevel = preferences.getInt("whiteLevel", settings.whiteLevel);
 
   // Default network mode logic if not set
   if (settings.networkMode == -1) {
@@ -473,6 +502,8 @@ void saveSettings() {
   preferences.putString("gateway", settings.gateway);
   preferences.putString("subnet", settings.subnet);
   preferences.putInt("networkMode", settings.networkMode);
+  preferences.putBool("useRGBW", settings.useRGBW);
+  preferences.putInt("whiteLevel", settings.whiteLevel);
   
   // Save pins
   for (int i = 0; i < NUMSTRIPS; i++) {
@@ -855,7 +886,7 @@ void startAPMode() {
 }
 
 /**
- * Cycle LEDs through RGB test pattern
+ * Cycle LEDs through RGB(W) test pattern
  */
 void cycleLEDs() {
   if (millis() - state.lastUpdate >= CYCLE_DELAY) {
@@ -863,10 +894,21 @@ void cycleLEDs() {
     
     // Determine color based on cycle
     uint32_t color;
-    switch (state.currentColor) {
-      case 0: color = strips[0].Color(settings.ledBrightness, 0, 0); break;  // Red
-      case 1: color = strips[0].Color(0, settings.ledBrightness, 0); break;  // Green
-      case 2: color = strips[0].Color(0, 0, settings.ledBrightness); break;  // Blue
+    if (settings.useRGBW) {
+      // RGBW mode - cycle through R, G, B, W
+      switch (state.currentColor) {
+        case 0: color = strips[0].Color(settings.ledBrightness, 0, 0, 0); break;  // Red
+        case 1: color = strips[0].Color(0, settings.ledBrightness, 0, 0); break;  // Green
+        case 2: color = strips[0].Color(0, 0, settings.ledBrightness, 0); break;  // Blue
+        case 3: color = strips[0].Color(0, 0, 0, settings.ledBrightness); break;  // White
+      }
+    } else {
+      // RGB mode - cycle through R, G, B
+      switch (state.currentColor) {
+        case 0: color = strips[0].Color(settings.ledBrightness, 0, 0); break;  // Red
+        case 1: color = strips[0].Color(0, settings.ledBrightness, 0); break;  // Green
+        case 2: color = strips[0].Color(0, 0, settings.ledBrightness); break;  // Blue
+      }
     }
     
     // Apply color to all strips
@@ -878,7 +920,8 @@ void cycleLEDs() {
     }
     
     // Move to the next color in cycle
-    state.currentColor = (state.currentColor + 1) % 3;
+    int maxColors = settings.useRGBW ? 4 : 3;
+    state.currentColor = (state.currentColor + 1) % maxColors;
   }
 }
 
@@ -909,7 +952,13 @@ void applyStaticColor() {
   // Apply to LED strips
   for (int i = 0; i < settings.numOutputs; i++) {
     for (int j = 0; j < settings.numLedsPerOutput; j++) {
-      strips[i].setPixelColor(j, color);
+      if (settings.useRGBW) {
+        // RGBW mode - add white channel
+        strips[i].setPixelColor(j, strips[i].Color(r, g, b, settings.whiteLevel));
+      } else {
+        // RGB mode
+        strips[i].setPixelColor(j, color);
+      }
     }
     strips[i].show();
   }
@@ -948,9 +997,27 @@ function toggleStaticIP() {
   container.style.display = useStaticIP ? 'block' : 'none';
 }
 
+function toggleRGBW() {
+  var container = document.getElementById('rgbw-container');
+  var useRGBW = document.getElementById('useRGBW').checked;
+  container.style.display = useRGBW ? 'block' : 'none';
+  
+  // Update max LEDs label
+  var maxLedsLabel = document.getElementById('maxLedsLabel');
+  var numLedsInput = document.getElementById('numledsoutput');
+  var maxLeds = useRGBW ? 510 : 680;
+  maxLedsLabel.textContent = maxLeds;
+  
+  // Adjust current value if it exceeds new max
+  if (parseInt(numLedsInput.value) > maxLeds) {
+    numLedsInput.value = maxLeds;
+  }
+}
+
 window.onload = function() {
   togglePinInputs();
   toggleStaticIP();
+  toggleRGBW();
 };
 )";
 
@@ -979,7 +1046,10 @@ void handleRoot() {
   content += F("'><br>");
   
   // LED settings
-  content += F("<label for='numledsoutput'>Number of LEDs per output (Max. 680):</label>");
+  int maxLeds = settings.useRGBW ? MAX_LEDS_RGBW : MAX_LEDS_RGB;
+  content += F("<label for='numledsoutput'>Number of LEDs per output (Max. <span id='maxLedsLabel'>");
+  content += String(maxLeds);
+  content += F("</span>):</label>");
   content += F("<input type='text' id='numledsoutput' name='numledsoutput' value='");
   content += String(settings.numLedsPerOutput);
   content += F("'><br>");
@@ -1002,6 +1072,24 @@ void handleRoot() {
   content += F("<output id='brightnessValue'>");
   content += String(settings.ledBrightness);
   content += F("</output><br>");
+  
+  // RGBW configuration
+  content += F("<label for='useRGBW'>Use RGBW LEDs (4 channels):</label>");
+  content += F("<input type='checkbox' id='useRGBW' name='useRGBW' onchange='toggleRGBW()' ");
+  content += settings.useRGBW ? F("checked") : F("");
+  content += F("><br>");
+  
+  content += F("<div id='rgbw-container' style='display: ");
+  content += settings.useRGBW ? F("block") : F("none");
+  content += F(";'>");
+  content += F("<label for='whiteLevel'>White Channel Level:</label>");
+  content += F("<input type='range' id='whiteLevel' name='whiteLevel' min='0' max='255' value='");
+  content += String(settings.whiteLevel);
+  content += F("' oninput='whiteLevelValue.value=this.value'>");
+  content += F("<output id='whiteLevelValue'>");
+  content += String(settings.whiteLevel);
+  content += F("</output><br>");
+  content += F("</div>");
   
   // Color settings
   content += F("<label for='staticColor'>Static RGB Color (Hex):</label>");
@@ -1117,11 +1205,24 @@ void handleConfig() {
     if (server.hasArg("ssid")) settings.ssid = server.arg("ssid");
     if (server.hasArg("password")) settings.password = server.arg("password");
     if (server.hasArg("staticColor")) settings.staticColor = server.arg("staticColor");
+    if (server.hasArg("whiteLevel")) settings.whiteLevel = server.arg("whiteLevel").toInt();
     
     // Update boolean settings
     settings.useWiFi = server.hasArg("useWiFi");
     settings.ledCycleEnabled = server.hasArg("ledCycleEnabled");
     settings.enStatColor = server.hasArg("enStatColor");
+    
+    // Handle RGBW mode change
+    bool wasRGBW = settings.useRGBW;
+    settings.useRGBW = server.hasArg("useRGBW");
+    
+    // If RGBW mode changed, enforce LED count limits
+    if (wasRGBW != settings.useRGBW) {
+      int maxLeds = getMaxLedsPerStrip();
+      if (settings.numLedsPerOutput > maxLeds) {
+        settings.numLedsPerOutput = maxLeds;
+      }
+    }
     
     // Update networkMode to match useWiFi setting
     if (settings.useWiFi) {
@@ -1190,7 +1291,7 @@ void handleConfig() {
     if (pinsChanged) {
       updateStripPins();
       // Re-initialize LED driver with updated pins
-      driver.initled(ledData, settings.pins, NUMSTRIPS, NUM_LEDS_PER_STRIP);
+      driver.initled(ledData, settings.pins, NUMSTRIPS, settings.numLedsPerOutput);
     }
     
     // Apply brightness
