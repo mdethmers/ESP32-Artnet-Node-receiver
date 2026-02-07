@@ -212,8 +212,11 @@ void setup() {
   }
   Serial.println("All LEDs set to black");
   
-  // Initialize LED driver
-  driver.initled(ledData, settings.pins, NUMSTRIPS, settings.numLedsPerOutput);
+  // Initialize LED driver with correct color order
+  int channelsPerLed = getChannelsPerLed();
+  colorarrangment colorOrder = settings.useRGBW ? ORDER_GRBW : ORDER_GRB;
+
+  driver.initled(ledData, settings.pins, NUMSTRIPS, settings.numLedsPerOutput, colorOrder);
   driver.setBrightness(settings.ledBrightness);
   
   // Initialize networking
@@ -257,12 +260,12 @@ void setup() {
                       " Out:" + String(settings.numOutputs);
     displayStatus(settings.nodeName, ipStr, ledsInfo);
     
-    // Initialize ArtNet
-    int channelsPerLed = getChannelsPerLed();
+    int universeSize = settings.useRGBW ? (128 * 4) : (170 * 3);  // 512 for RGBW, 510 for RGB
+
     artnet.addSubArtnet(
       settings.startUniverse, 
       settings.numLedsPerOutput * settings.numOutputs * channelsPerLed, 
-      UNIVERSE_SIZE_IN_CHANNEL, 
+      universeSize, 
       &displayfunction
     );
     artnet.setNodeName(settings.nodeName);
