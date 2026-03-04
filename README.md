@@ -71,6 +71,8 @@ All LEDs based on the wsXXXX series are supported. These can be 3 or 4 channel L
 Tests with SPI based leds like the APA102/107 are a work in progress, just like software support for 4 and 5 channel leds. Artnet works with 4/5 channel leds, but software support is coming!
 
 ## WLED
+Check this [youtube video](https://www.youtube.com/watch?v=f3e7oMOB8D4) on how to install WLED!
+
 This controller also supports the WLED software (WIFI ONLY!), supporting Artnet, DMX, and Standalone animations. When using multiple nodes, these can sync over WIFI in standalone mode. Install WLED through the [Web Installer](https://install.wled.me/) (plain version!).
 In the WLED folder, you can find a [WLED config file](WLED/wled_cfg.json) that works with the controller, which you can use to receive the correct pin settings. Upload these in the security and update pagae > Restore configuration. This config file is set to 680 LEDs per pin, using a 10A power supply, and with WS2814/SK6912 type leds. CHANGE THESE ACCORDING TO YOUR OWN SETUP!
 
@@ -81,7 +83,6 @@ The W5500 Ethernet module and OLED screen can work with WLED:
 ### WLED ARTNET / sACN (E1.31)
 To get Artnet to work on your WLED install, go to SYNC settings and set your network DMX input to Artnet or sACN (E1.31), and DMX mode to Multi-RGB. Make sure to reboot. 
 In LED preferences, set the number of LEDs to the number of universes you need (Eg. 340 for 2 universes per output, maximum I got working was 510 leds / 9 universes). Set resolume to send the number of universes equal to # outputs * # of universes per output. 
-
 # Configuration
 
 ![Image Description](https://github.com/mdethmers/ESP32-W5500-Artnet-receiver/blob/main/Img/Schermafbeelding%202025-05-13%20224004.png)
