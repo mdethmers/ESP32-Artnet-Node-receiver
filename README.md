@@ -69,8 +69,15 @@ All LEDs based on the wsXXXX series are supported. These can be 3 or 4 channel L
   - GS8208, TM1814, TM1829, UCS8904, UCS8903, FW1906 (Not tested)
 
 Tests with SPI based leds like the APA102/107 are a work in progress, just like software support for 4 and 5 channel leds. Artnet works with 4/5 channel leds, but software support is coming!
-  
- 
+
+## WLED
+This controller also supports the WLED software (WIFI ONLY!), supporting Artnet, DMX, and Standalone animations. When using multiple nodes, these can sync over WIFI in standalone mode. Install WLED through the [Web Installer](https://install.wled.me/) (plain version!).
+In the WLED folder, you can find a [WLED config file](WLED/wled_cfg.json) that works with the controller, which you can use to receive the correct pin settings. Upload these in the security and update pagae > Restore configuration. This config file is set to 680 LEDs per pin, using a 10A power supply, and with WS2814/SK6912 type leds. CHANGE THESE ACCORDING TO YOUR OWN SETUP!
+
+The W5500 Ethernet module and OLED screen can work with WLED:
+- W5500 capable version of WLED is available here and should work (Not tested): https://github.com/stcalica/WLED-W500
+- 128x32 OLED 4-line display mod available as well (Not tested): https://mm.kno.wled.ge/usermods/4LineDisplay/#installation_1
+
 # Configuration
 
 ![Image Description](https://github.com/mdethmers/ESP32-W5500-Artnet-receiver/blob/main/Img/Schermafbeelding%202025-05-13%20224004.png)
