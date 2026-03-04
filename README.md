@@ -78,6 +78,10 @@ The W5500 Ethernet module and OLED screen can work with WLED:
 - W5500 capable version of WLED is available here and should work (Not tested): https://github.com/stcalica/WLED-W500
 - 128x32 OLED 4-line display mod available as well (Not tested): https://mm.kno.wled.ge/usermods/4LineDisplay/#installation_1
 
+### WLED ARTNET / sACN (E1.31)
+To get Artnet to work on your WLED install, go to SYNC settings and set your network DMX input to Artnet or sACN (E1.31), and DMX mode to Multi-RGB. Make sure to reboot. 
+In LED preferences, set the number of LEDs to the number of universes you need (Eg. 340 for 2 universes per output, maximum I got working was 510 leds / 9 universes). Set resolume to send the number of universes equal to # outputs * # of universes per output. 
+
 # Configuration
 
 ![Image Description](https://github.com/mdethmers/ESP32-W5500-Artnet-receiver/blob/main/Img/Schermafbeelding%202025-05-13%20224004.png)
