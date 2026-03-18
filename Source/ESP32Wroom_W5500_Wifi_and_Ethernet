@@ -10,11 +10,10 @@
 #define UNIQUE_SUBARTNET
 
 // LED configuration
-#define MAX_LEDS_RGB 680              // Maximum LEDs for RGB (170 × 4 universes = 680 LEDs, 510 channels per universe)
-#define MAX_LEDS_RGBW 512             // Maximum LEDs for RGBW (128 × 4 universes = 512 LEDs, 512 channels per universe)
-#define NUM_LEDS_PER_STRIP 680        // For I2SClocklessLedDriver library compatibility (max across all strips)
+#define NUM_LEDS_PER_STRIP 680        // Maximum number of LEDs per strip
 #define NUMSTRIPS 4                   // Maximum number of LED strips
-#define UNIVERSE_SIZE_IN_CHANNEL 512  // Standard ArtNet universe size
+#define NB_CHANNEL_PER_LED 3          // Number of channels per LED (3 for RGB, 4 for RGBW)
+#define UNIVERSE_SIZE_IN_CHANNEL 510  // Size of a universe (170 pixels * 3 channels)
 #define COLOR_RBG                     // Define color order (Green-Red-Blue)
 
 // Hardware configuration
@@ -24,6 +23,9 @@
 #define OLED_RESET 4
 #define SCREEN_ADDRESS 0x3C
 #define BOOT_BUTTON_PIN 0
+
+//Level shifter installed and enabled
+int ShifterPin = 25;
 
 // Include necessary libraries
 #include <Preferences.h>
@@ -71,7 +73,7 @@ void ESP32_W5500_onEvent();
 
 // Configuration structure
 struct Settings {
-  int numLedsPerOutput = 680;  // Default to RGB max (680 LEDs across 4 universes)
+  int numLedsPerOutput = 680;
   int numOutputs = 4;
   int startUniverse = 0;
   int pins[NUMSTRIPS] = {12, 14, 27, 26};
@@ -89,8 +91,8 @@ struct Settings {
   String gateway = "192.168.1.1";
   String subnet = "255.255.255.0";
   int networkMode = 0; // 0: Ethernet, 1: WiFi, 2: AP
-  bool useRGBW = false; // false = RGB (3 channels), true = RGBW (4 channels)
-  int whiteLevel = 0; // White channel level for RGBW (0-255)
+  int colorOrder = 0; // 0: BRG, 1: RGB, 2: GRB, 3: GBR, 4: RBG, 5: BGR
+  bool useRGBW = false; // false: RGB, true: RGBW
 };
 
 // Runtime state
@@ -136,31 +138,51 @@ Preferences preferences;
 artnetESP32V2 artnet = artnetESP32V2();
 I2SClocklessLedDriver driver;
 
-// LED storage - allocate for maximum size to support both RGB and RGBW
-// RGB: 680 LEDs × 3 channels × 4 strips = 8,160 bytes
-// RGBW: 512 LEDs × 4 channels × 4 strips = 8,192 bytes
-uint8_t ledData[4 * NUMSTRIPS * MAX_LEDS_RGB];  // 10,880 bytes (allows for dynamic configuration)
+// LED storage
+uint8_t ledData[NB_CHANNEL_PER_LED * NUMSTRIPS * NUM_LEDS_PER_STRIP];
 
 // Settings and state
 Settings settings;
 State state;
 
-// Helper functions to get current LED configuration
-int getMaxLedsPerStrip() {
-  return settings.useRGBW ? MAX_LEDS_RGBW : MAX_LEDS_RGB;
+// Color order mapping function
+uint16_t getColorOrder(int colorOrderIndex, bool useRGBW) {
+  if (useRGBW) {
+    // RGBW color orders
+    switch (colorOrderIndex) {
+      case 0: return NEO_BRGW + NEO_KHZ800; // BRGW (default)
+      case 1: return NEO_RGBW + NEO_KHZ800; // RGBW
+      case 2: return NEO_GRBW + NEO_KHZ800; // GRBW
+      case 3: return NEO_GBRW + NEO_KHZ800; // GBRW
+      case 4: return NEO_RBGW + NEO_KHZ800; // RBGW
+      case 5: return NEO_BGRW + NEO_KHZ800; // BGRW
+      case 6: return NEO_WRGB + NEO_KHZ800; // WRGB
+      case 7: return NEO_WRBG + NEO_KHZ800; // WRBG
+      case 8: return NEO_WGRB + NEO_KHZ800; // WGRB
+      case 9: return NEO_WGBR + NEO_KHZ800; // WGBR
+      case 10: return NEO_WBRG + NEO_KHZ800; // WBRG
+      case 11: return NEO_WBGR + NEO_KHZ800; // WBGR
+      default: return NEO_BRGW + NEO_KHZ800;
+    }
+  } else {
+    // RGB color orders
+    switch (colorOrderIndex) {
+      case 0: return NEO_BRG + NEO_KHZ800; // BRG (default)
+      case 1: return NEO_RGB + NEO_KHZ800; // RGB
+      case 2: return NEO_GRB + NEO_KHZ800; // GRB
+      case 3: return NEO_GBR + NEO_KHZ800; // GBR
+      case 4: return NEO_RBG + NEO_KHZ800; // RBG
+      case 5: return NEO_BGR + NEO_KHZ800; // BGR
+      default: return NEO_BRG + NEO_KHZ800;
+    }
+  }
 }
 
-int getChannelsPerLed() {
-  return settings.useRGBW ? 4 : 3;
-}
+// LED strip objects - using pointers for safe dynamic allocation
+Adafruit_NeoPixel* strips[NUMSTRIPS] = {nullptr, nullptr, nullptr, nullptr};
 
-// LED strip objects - will be reconfigured in setup based on RGB/RGBW setting
-Adafruit_NeoPixel strips[NUMSTRIPS] = {
-  Adafruit_NeoPixel(MAX_LEDS_RGB, DEFAULT_PINS[0], NEO_BRG + NEO_KHZ800),
-  Adafruit_NeoPixel(MAX_LEDS_RGB, DEFAULT_PINS[1], NEO_BRG + NEO_KHZ800),
-  Adafruit_NeoPixel(MAX_LEDS_RGB, DEFAULT_PINS[2], NEO_BRG + NEO_KHZ800),
-  Adafruit_NeoPixel(MAX_LEDS_RGB, DEFAULT_PINS[3], NEO_BRG + NEO_KHZ800)
-};
+// Color configuration variable
+uint16_t ledColorConfig;
 
 // ArtNet callback function
 void displayfunction(void *param) {
@@ -173,6 +195,9 @@ void displayfunction(void *param) {
  */
 void setup() {
   Serial.begin(115200);
+
+  pinMode(ShifterPin, OUTPUT);   // Set pin as output
+  digitalWrite(ShifterPin, LOW); // Pull the pin to LOW (0V)
   
   // Initialize status LED
   StatusLed.begin();
@@ -187,38 +212,32 @@ void setup() {
   // Load settings from preferences
   loadSettings();
   
-  // Enforce LED count limits based on RGB/RGBW mode
-  int maxLeds = getMaxLedsPerStrip();
-  if (settings.numLedsPerOutput > maxLeds) {
-    settings.numLedsPerOutput = maxLeds;
-    saveSettings();
-  }
+  // Get the color configuration from loaded settings
+  ledColorConfig = getColorOrder(settings.colorOrder, settings.useRGBW);
   
-  // Reconfigure LED strips based on RGB/RGBW setting
-  uint16_t pixelType = settings.useRGBW ? (NEO_GRBW + NEO_KHZ800) : (NEO_BRG + NEO_KHZ800);
+  Serial.printf("Initializing LED strips with color order %d, RGBW: %s\n", 
+                settings.colorOrder, settings.useRGBW ? "true" : "false");
+  
+  // Initialize strips with correct config and pins using dynamic allocation
   for (int i = 0; i < NUMSTRIPS; i++) {
-    strips[i].updateType(pixelType);
-    strips[i].updateLength(settings.numLedsPerOutput);
+    Serial.printf("Strip %d: Pin %d, Color config 0x%04X\n", i, settings.pins[i], ledColorConfig);
+    strips[i] = new Adafruit_NeoPixel(NUM_LEDS_PER_STRIP, settings.pins[i], ledColorConfig);
+    strips[i]->begin();
   }
-  
-  // Update strip pins based on loaded settings
-  updateStripPins();
   
   // Set all LEDs to black (off) before initializing driver
   for (int i = 0; i < settings.numOutputs; i++) {
-    strips[i].begin();
-    for (int j = 0; j < settings.numLedsPerOutput; j++) {
-      strips[i].setPixelColor(j, 0);  // Set to black (off)
+    if (strips[i] != nullptr) {
+      for (int j = 0; j < settings.numLedsPerOutput; j++) {
+        strips[i]->setPixelColor(j, 0);  // Set to black (off)
+      }
+      strips[i]->show();
     }
-    strips[i].show();
   }
   Serial.println("All LEDs set to black");
   
-  // Initialize LED driver with correct color order
-  int channelsPerLed = getChannelsPerLed();
-  colorarrangment colorOrder = settings.useRGBW ? ORDER_GRBW : ORDER_GRB;
-
-  driver.initled(ledData, settings.pins, NUMSTRIPS, settings.numLedsPerOutput, colorOrder);
+  // Initialize LED driver
+  driver.initled(ledData, settings.pins, NUMSTRIPS, NUM_LEDS_PER_STRIP);
   driver.setBrightness(settings.ledBrightness);
   
   // Initialize networking
@@ -258,19 +277,15 @@ void setup() {
     
     // Update display with connection info
     String ipStr = activeIP.toString();
-    int ledsPerUniverse = settings.useRGBW ? 128 : 170;
-    int universesPerOutput = (settings.numLedsPerOutput + ledsPerUniverse - 1) / ledsPerUniverse;
-    String ledsInfo = "LED:" + String(settings.numLedsPerOutput) + 
-                      " Uni:" + String(universesPerOutput) +
+    String ledsInfo = "LEDs:" + String(settings.numLedsPerOutput) + 
                       " Out:" + String(settings.numOutputs);
     displayStatus(settings.nodeName, ipStr, ledsInfo);
     
-    int universeSize = settings.useRGBW ? (128 * 4) : (170 * 3);  // 512 for RGBW, 510 for RGB
-
+    // Initialize ArtNet
     artnet.addSubArtnet(
       settings.startUniverse, 
-      settings.numLedsPerOutput * settings.numOutputs * channelsPerLed, 
-      universeSize, 
+      settings.numLedsPerOutput * settings.numOutputs * NB_CHANNEL_PER_LED, 
+      UNIVERSE_SIZE_IN_CHANNEL, 
       &displayfunction
     );
     artnet.setNodeName(settings.nodeName);
@@ -347,10 +362,7 @@ void loop() {
           
           // Create display info with LEDs and outputs count
           String ipInfo = "WiFi: " + WiFi.localIP().toString();
-          int ledsPerUniverse = settings.useRGBW ? 128 : 170;
-          int universesPerOutput = (settings.numLedsPerOutput + ledsPerUniverse - 1) / ledsPerUniverse;
-          String ledsInfo = "LED:" + String(settings.numLedsPerOutput) + 
-                            " Uni:" + String(universesPerOutput) +
+          String ledsInfo = "LEDs:" + String(settings.numLedsPerOutput) + 
                             " Out:" + String(settings.numOutputs);
           
           displayStatus(settings.nodeName, ipInfo, ledsInfo, "", true);  // Show WiFi icon
@@ -391,10 +403,7 @@ void loop() {
           
           // Create display info with LEDs and outputs count
           String ipInfo = settings.useStaticIP ? "Static: " + settings.staticIP : "DHCP: " + ETH.localIP().toString();
-          int ledsPerUniverse = settings.useRGBW ? 128 : 170;
-          int universesPerOutput = (settings.numLedsPerOutput + ledsPerUniverse - 1) / ledsPerUniverse;
-          String ledsInfo = "LED:" + String(settings.numLedsPerOutput) + 
-                            " Uni:" + String(universesPerOutput) +
+          String ledsInfo = "LEDs:" + String(settings.numLedsPerOutput) + 
                             " Out:" + String(settings.numOutputs);
           
           displayStatus(settings.nodeName, ipInfo, ledsInfo);
@@ -421,17 +430,12 @@ void loop() {
 
 /**
  * Update all LED strip pins according to settings
+ * Note: This function is not used in the current implementation
+ * since strips are initialized once during setup with correct configuration
  */
 void updateStripPins() {
-  for (int i = 0; i < NUMSTRIPS; i++) {
-    if (strips[i].getPin() != settings.pins[i]) {
-      Serial.printf("Strip %d pin changed from %d to %d\n", 
-                    i, strips[i].getPin(), settings.pins[i]);
-      
-      strips[i].setPin(settings.pins[i]);
-      strips[i].begin();
-    }
-  }
+  // This function is deprecated - strips are initialized once in setup()
+  Serial.println("updateStripPins() called but not needed - strips initialized in setup()");
 }
 
 /**
@@ -458,8 +462,8 @@ void loadSettings() {
   settings.gateway = preferences.getString("gateway", settings.gateway);
   settings.subnet = preferences.getString("subnet", settings.subnet);
   settings.networkMode = preferences.getInt("networkMode", -1);
+  settings.colorOrder = preferences.getInt("colorOrder", settings.colorOrder);
   settings.useRGBW = preferences.getBool("useRGBW", settings.useRGBW);
-  settings.whiteLevel = preferences.getInt("whiteLevel", settings.whiteLevel);
 
   // Default network mode logic if not set
   if (settings.networkMode == -1) {
@@ -516,8 +520,8 @@ void saveSettings() {
   preferences.putString("gateway", settings.gateway);
   preferences.putString("subnet", settings.subnet);
   preferences.putInt("networkMode", settings.networkMode);
+  preferences.putInt("colorOrder", settings.colorOrder);
   preferences.putBool("useRGBW", settings.useRGBW);
-  preferences.putInt("whiteLevel", settings.whiteLevel);
   
   // Save pins
   for (int i = 0; i < NUMSTRIPS; i++) {
@@ -638,10 +642,12 @@ void handleColorSelection() {
   
   // Apply to LED strips
   for (int i = 0; i < settings.numOutputs; i++) {
-    for (int j = 0; j < settings.numLedsPerOutput; j++) {
-      strips[i].setPixelColor(j, color);
+    if (strips[i] != nullptr) {
+      for (int j = 0; j < settings.numLedsPerOutput; j++) {
+        strips[i]->setPixelColor(j, color);
+      }
+      strips[i]->show();
     }
-    strips[i].show();
   }
 }
 
@@ -658,31 +664,7 @@ void checkBootButton() {
       
       // Long press (1000ms) - handle based on current mode
       if (pressDuration > 1000) {
-        Serial.println("long press triggered");
-        if (settings.networkMode == 0) {
-          // In Ethernet mode - toggle between Static IP and DHCP
-          Serial.println("toggle between Static IP and DHCP");
-          settings.useStaticIP = !settings.useStaticIP;
-          saveSettings();
-          
-          // Show feedback on display
-          if (settings.useStaticIP) {
-            displayStatus("Switching to", "Static IP", settings.staticIP);
-            Serial.println("Switching to Static IP: " + settings.staticIP);
-          } else {
-            displayStatus("Switching to", "DHCP");
-            Serial.println("Switching to DHCP");
-          }
-          
-          // Wait for button release
-          while(digitalRead(BOOT_BUTTON_PIN) == LOW) {
-            delay(10);
-          }
-          
-          delay(1000);
-          ESP.restart();
-          return;
-        } else if (settings.networkMode == 4) {
+        if (settings.networkMode == 4) {
           // In standalone static color mode - toggle color selection
           state.colorSelectionMode = !state.colorSelectionMode;
           
@@ -900,42 +882,35 @@ void startAPMode() {
 }
 
 /**
- * Cycle LEDs through RGB(W) test pattern
+ * Cycle LEDs through RGB test pattern
  */
 void cycleLEDs() {
   if (millis() - state.lastUpdate >= CYCLE_DELAY) {
     state.lastUpdate = millis();
     
+    // Check if strips are initialized
+    if (strips[0] == nullptr) return;
+    
     // Determine color based on cycle
     uint32_t color;
-    if (settings.useRGBW) {
-      // RGBW mode - cycle through R, G, B, W
-      switch (state.currentColor) {
-        case 0: color = strips[0].Color(settings.ledBrightness, 0, 0, 0); break;  // Red
-        case 1: color = strips[0].Color(0, settings.ledBrightness, 0, 0); break;  // Green
-        case 2: color = strips[0].Color(0, 0, settings.ledBrightness, 0); break;  // Blue
-        case 3: color = strips[0].Color(0, 0, 0, settings.ledBrightness); break;  // White
-      }
-    } else {
-      // RGB mode - cycle through R, G, B
-      switch (state.currentColor) {
-        case 0: color = strips[0].Color(settings.ledBrightness, 0, 0); break;  // Red
-        case 1: color = strips[0].Color(0, settings.ledBrightness, 0); break;  // Green
-        case 2: color = strips[0].Color(0, 0, settings.ledBrightness); break;  // Blue
-      }
+    switch (state.currentColor) {
+      case 0: color = strips[0]->Color(settings.ledBrightness, 0, 0); break;  // Red
+      case 1: color = strips[0]->Color(0, settings.ledBrightness, 0); break;  // Green
+      case 2: color = strips[0]->Color(0, 0, settings.ledBrightness); break;  // Blue
     }
     
     // Apply color to all strips
     for (int i = 0; i < settings.numOutputs; i++) {
-      for (int j = 0; j < settings.numLedsPerOutput; j++) {
-        strips[i].setPixelColor(j, color);
+      if (strips[i] != nullptr) {
+        for (int j = 0; j < settings.numLedsPerOutput; j++) {
+          strips[i]->setPixelColor(j, color);
+        }
+        strips[i]->show();
       }
-      strips[i].show();
     }
     
     // Move to the next color in cycle
-    int maxColors = settings.useRGBW ? 4 : 3;
-    state.currentColor = (state.currentColor + 1) % maxColors;
+    state.currentColor = (state.currentColor + 1) % 3;
   }
 }
 
@@ -965,16 +940,12 @@ void applyStaticColor() {
   
   // Apply to LED strips
   for (int i = 0; i < settings.numOutputs; i++) {
-    for (int j = 0; j < settings.numLedsPerOutput; j++) {
-      if (settings.useRGBW) {
-        // RGBW mode - add white channel
-        strips[i].setPixelColor(j, strips[i].Color(r, g, b, settings.whiteLevel));
-      } else {
-        // RGB mode
-        strips[i].setPixelColor(j, color);
+    if (strips[i] != nullptr) {
+      for (int j = 0; j < settings.numLedsPerOutput; j++) {
+        strips[i]->setPixelColor(j, color);
       }
+      strips[i]->show();
     }
-    strips[i].show();
   }
 }
 
@@ -982,50 +953,17 @@ void applyStaticColor() {
  * CSS styles for web interface
  */
 const char* const CSS_STYLES = R"(
-:root {
-  --bg-color: #f4f4f4;
-  --text-color: #333;
-  --form-bg: #fff;
-  --input-bg: #fff;
-  --input-border: #ccc;
-  --button-bg: #4CAF50;
-  --button-hover: #45a049;
-  --accent-color: #007bff;
-  --warning-color: #d9534f;
-  --muted-text: #666;
-}
-body.dark-mode {
-  --bg-color: #1a1a1a;
-  --text-color: #e0e0e0;
-  --form-bg: #2d2d2d;
-  --input-bg: #3a3a3a;
-  --input-border: #555;
-  --button-bg: #ff8c00;
-  --button-hover: #ff7700;
-  --accent-color: #ff8c00;
-  --warning-color: #ff6b6b;
-  --muted-text: #999;
-}
-body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: var(--bg-color); color: var(--text-color); text-align: center; transition: background-color 0.3s, color 0.3s; }
+body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f4f4f4; color: #333; text-align: center; }
 h1 { font-size: 24px; margin-bottom: 20px; }
-.dark-mode-toggle { position: fixed; top: 20px; right: 20px; background-color: var(--accent-color); color: white; border: none; padding: 10px 15px; border-radius: 20px; cursor: pointer; font-size: 14px; z-index: 1000; transition: background-color 0.3s; }
-.dark-mode-toggle:hover { opacity: 0.8; }
-form { background-color: var(--form-bg); padding: 20px; padding-right: 40px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1); max-width: 400px; margin: auto; transition: background-color 0.3s; }
-input[type='text'], input[type='number'] { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid var(--input-border); border-radius: 4px; font-size: 16px; background-color: var(--input-bg); color: var(--text-color); transition: background-color 0.3s, border-color 0.3s, color 0.3s; }
-input[type='submit'] { background-color: var(--button-bg); color: white; border: none; padding: 12px; font-size: 16px; cursor: pointer; border-radius: 4px; width: 100%; transition: background-color 0.3s; }
-input[type='submit']:hover { background-color: var(--button-hover); }
-.warning { margin-top: 20px; color: var(--warning-color); font-size: 14px; }
+form { background-color: #fff; padding: 20px; padding-right: 40px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1); max-width: 400px; margin: auto; }
+input[type='text'], input[type='number'] { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ccc; border-radius: 4px; font-size: 16px; }
+input[type='submit'] { background-color: #4CAF50; color: white; border: none; padding: 12px; font-size: 16px; cursor: pointer; border-radius: 4px; width: 100%; }
+input[type='submit']:hover { background-color: #45a049; }
+.warning { margin-top: 20px; color: #d9534f; font-size: 14px; }
 .pin-input { width: 60px !important; display: inline-block; margin-right: 10px; }
-.pin-container { margin: 10px 0; padding: 10px; background-color: var(--input-bg); border-radius: 5px; transition: background-color 0.3s; }
+.pin-container { margin: 10px 0; }
 .pin-label { display: inline-block; width: 100px; text-align: left; }
-.radio-group { display: flex; justify-content: center; gap: 20px; margin: 10px 0; }
-.radio-option { display: flex; align-items: center; gap: 5px; }
-.radio-option input[type='radio'] { margin: 0; }
-.slider-container { margin: 15px 0; }
-.slider-value { display: inline-block; min-width: 50px; text-align: center; font-weight: bold; }
-input[type='range'] { width: 70%; }
-a { color: var(--accent-color); transition: color 0.3s; }
-.default-pin { color: var(--muted-text); font-size: 0.9em; margin-left: 5px; transition: color 0.3s; }
+.default-pin { color: #666; font-size: 0.9em; margin-left: 5px; }
 )";
 
 /**
@@ -1044,71 +982,33 @@ function toggleStaticIP() {
   container.style.display = useStaticIP ? 'block' : 'none';
 }
 
-function updateChannelMode() {
-  var isRGBW = document.querySelector('input[name="channelMode"]:checked').value === '4';
-  var whiteLevelContainer = document.getElementById('white-level-container');
-  var staticColorEnabled = document.getElementById('enStatColor').checked;
+function updateColorOrderOptions() {
+  var useRGBW = document.getElementById('useRGBW').value === '1';
+  var rgbOrders = document.getElementById('rgb-orders');
+  var rgbwOrders = document.getElementById('rgbw-orders');
+  var colorOrderSelect = document.getElementById('colorOrder');
   
-  // Show white level only if RGBW mode AND static color is enabled
-  whiteLevelContainer.style.display = (isRGBW && staticColorEnabled) ? 'block' : 'none';
-  
-  // Update LED universe slider
-  updateUniverseSlider();
-}
-
-function updateStaticColorState() {
-  var isRGBW = document.querySelector('input[name="channelMode"]:checked').value === '4';
-  var staticColorEnabled = document.getElementById('enStatColor').checked;
-  var whiteLevelContainer = document.getElementById('white-level-container');
-  
-  // Show white level only if RGBW mode AND static color is enabled
-  whiteLevelContainer.style.display = (isRGBW && staticColorEnabled) ? 'block' : 'none';
-}
-
-function updateUniverseSlider() {
-  var isRGBW = document.querySelector('input[name="channelMode"]:checked').value === '4';
-  var slider = document.getElementById('numLedsSlider');
-  var output = document.getElementById('numLedsValue');
-  var hiddenInput = document.getElementById('numledsoutput');
-  
-  var universes = parseInt(slider.value);
-  var ledsPerUniverse = isRGBW ? 128 : 170;
-  var totalLeds = universes * ledsPerUniverse;
-  
-  output.textContent = universes + ' universe' + (universes > 1 ? 's' : '') + ' (' + totalLeds + ' LEDs)';
-  hiddenInput.value = totalLeds;
-}
-
-function updateOutputSlider() {
-  var slider = document.getElementById('numOutputSlider');
-  var output = document.getElementById('numOutputValue');
-  var hiddenInput = document.getElementById('numoutput');
-  
-  output.textContent = slider.value;
-  hiddenInput.value = slider.value;
-}
-
-function toggleDarkMode() {
-  document.body.classList.toggle('dark-mode');
-  var isDark = document.body.classList.contains('dark-mode');
-  localStorage.setItem('darkMode', isDark ? 'enabled' : 'disabled');
-  
-  var btn = document.getElementById('darkModeBtn');
-  btn.textContent = isDark ? 'Light Mode' : 'Dark Mode';
+  if (useRGBW) {
+    rgbOrders.style.display = 'none';
+    rgbwOrders.style.display = 'block';
+    // Reset to first RGBW option if currently on RGB option
+    if (colorOrderSelect.value < 6) {
+      colorOrderSelect.value = '0';
+    }
+  } else {
+    rgbOrders.style.display = 'block';
+    rgbwOrders.style.display = 'none';
+    // Reset to first RGB option if currently on RGBW option
+    if (colorOrderSelect.value > 5) {
+      colorOrderSelect.value = '0';
+    }
+  }
 }
 
 window.onload = function() {
   togglePinInputs();
   toggleStaticIP();
-  updateChannelMode();
-  updateUniverseSlider();
-  updateOutputSlider();
-  
-  // Check for saved dark mode preference
-  if (localStorage.getItem('darkMode') === 'enabled') {
-    document.body.classList.add('dark-mode');
-    document.getElementById('darkModeBtn').textContent = 'Light Mode';
-  }
+  updateColorOrderOptions();
 };
 )";
 
@@ -1125,9 +1025,7 @@ void handleRoot() {
   content += JS_CODE;
   content += F("</script>");
   content += F("</head>");
-  content += F("<body>");
-  content += F("<button id='darkModeBtn' class='dark-mode-toggle' onclick='toggleDarkMode()'>Dark Mode</button>");
-  content += F("<h1>");
+  content += F("<body><h1>");
   content += settings.nodeName;
   content += F(" Configuration</h1>");
   content += F("<form method='POST' action='/config'>");
@@ -1138,51 +1036,16 @@ void handleRoot() {
   content += settings.nodeName;
   content += F("'><br>");
   
-  // Channel mode selection (RGB vs RGBW)
-  content += F("<label>LED Channel Mode:</label>");
-  content += F("<div class='radio-group'>");
-  content += F("<div class='radio-option'>");
-  content += F("<input type='radio' id='rgb3ch' name='channelMode' value='3' onchange='updateChannelMode()' ");
-  content += !settings.useRGBW ? F("checked") : F("");
-  content += F("><label for='rgb3ch'>RGB (3 channels)</label>");
-  content += F("</div>");
-  content += F("<div class='radio-option'>");
-  content += F("<input type='radio' id='rgbw4ch' name='channelMode' value='4' onchange='updateChannelMode()' ");
-  content += settings.useRGBW ? F("checked") : F("");
-  content += F("><label for='rgbw4ch'>RGBW (4 channels)</label>");
-  content += F("</div>");
-  content += F("</div>");
-  
-  // LED universes slider
-  int ledsPerUniverse = settings.useRGBW ? 128 : 170;
-  int currentUniverses = (settings.numLedsPerOutput + ledsPerUniverse - 1) / ledsPerUniverse; // Round up
-  if (currentUniverses < 1) currentUniverses = 1;
-  if (currentUniverses > 4) currentUniverses = 4;
-  
-  content += F("<div class='slider-container'>");
-  content += F("<label for='numLedsSlider'>LEDs per output:</label><br>");
-  content += F("<input type='range' id='numLedsSlider' min='1' max='4' step='1' value='");
-  content += String(currentUniverses);
-  content += F("' oninput='updateUniverseSlider()'>");
-  content += F("<span class='slider-value' id='numLedsValue'></span>");
-  content += F("<input type='hidden' id='numledsoutput' name='numledsoutput' value='");
+  // LED settings
+  content += F("<label for='numledsoutput'>Number of LEDs per output (Max. 680):</label>");
+  content += F("<input type='text' id='numledsoutput' name='numledsoutput' value='");
   content += String(settings.numLedsPerOutput);
-  content += F("'>");
-  content += F("</div>");
+  content += F("'><br>");
   
-  // Number of outputs slider
-  content += F("<div class='slider-container'>");
-  content += F("<label for='numOutputSlider'>Number of outputs:</label><br>");
-  content += F("<input type='range' id='numOutputSlider' min='1' max='4' step='1' value='");
+  content += F("<label for='numoutput'>Number of outputs (Max. 4):</label>");
+  content += F("<input type='text' id='numoutput' name='numoutput' value='");
   content += String(settings.numOutputs);
-  content += F("' oninput='updateOutputSlider()'>");
-  content += F("<span class='slider-value' id='numOutputValue'>");
-  content += String(settings.numOutputs);
-  content += F("</span>");
-  content += F("<input type='hidden' id='numoutput' name='numoutput' value='");
-  content += String(settings.numOutputs);
-  content += F("'>");
-  content += F("</div>");
+  content += F("'><br>");
   
   content += F("<label for='startuniverse'>Start universe:</label>");
   content += F("<input type='text' id='startuniverse' name='startuniverse' value='");
@@ -1190,15 +1053,95 @@ void handleRoot() {
   content += F("'><br>");
   
   // Brightness slider
-  content += F("<div class='slider-container'>");
-  content += F("<label for='ledbrightness'>Max. LED brightness:</label><br>");
+  content += F("<label for='ledbrightness'>Max. LED brightness:</label>");
   content += F("<input type='range' id='ledbrightness' name='ledbrightness' min='0' max='255' value='");
   content += String(settings.ledBrightness);
   content += F("' oninput='brightnessValue.value=this.value'>");
-  content += F("<span class='slider-value'><output id='brightnessValue'>");
+  content += F("<output id='brightnessValue'>");
   content += String(settings.ledBrightness);
-  content += F("</output></span>");
-  content += F("</div>");
+  content += F("</output><br>");
+  
+  // LED Type Configuration
+  content += F("<label for='useRGBW'>LED Type:</label>");
+  content += F("<select id='useRGBW' name='useRGBW' onchange='updateColorOrderOptions()'>");
+  content += F("<option value='0'");
+  if (!settings.useRGBW) content += F(" selected");
+  content += F(">RGB (3-channel)</option>");
+  content += F("<option value='1'");
+  if (settings.useRGBW) content += F(" selected");
+  content += F(">RGBW (4-channel)</option>");
+  content += F("</select><br>");
+  
+  // Color Order Configuration
+  content += F("<label for='colorOrder'>Color Order:</label>");
+  content += F("<select id='colorOrder' name='colorOrder'>");
+  
+  // RGB color orders (will be shown/hidden by JavaScript)
+  content += F("<optgroup id='rgb-orders' label='RGB Orders'");
+  if (settings.useRGBW) content += F(" style='display:none'");
+  content += F(">");
+  content += F("<option value='0'");
+  if (!settings.useRGBW && settings.colorOrder == 0) content += F(" selected");
+  content += F(">BRG (Blue-Red-Green)</option>");
+  content += F("<option value='1'");
+  if (!settings.useRGBW && settings.colorOrder == 1) content += F(" selected");
+  content += F(">RGB (Red-Green-Blue)</option>");
+  content += F("<option value='2'");
+  if (!settings.useRGBW && settings.colorOrder == 2) content += F(" selected");
+  content += F(">GRB (Green-Red-Blue)</option>");
+  content += F("<option value='3'");
+  if (!settings.useRGBW && settings.colorOrder == 3) content += F(" selected");
+  content += F(">GBR (Green-Blue-Red)</option>");
+  content += F("<option value='4'");
+  if (!settings.useRGBW && settings.colorOrder == 4) content += F(" selected");
+  content += F(">RBG (Red-Blue-Green)</option>");
+  content += F("<option value='5'");
+  if (!settings.useRGBW && settings.colorOrder == 5) content += F(" selected");
+  content += F(">BGR (Blue-Green-Red)</option>");
+  content += F("</optgroup>");
+  
+  // RGBW color orders (will be shown/hidden by JavaScript)
+  content += F("<optgroup id='rgbw-orders' label='RGBW Orders'");
+  if (!settings.useRGBW) content += F(" style='display:none'");
+  content += F(">");
+  content += F("<option value='0'");
+  if (settings.useRGBW && settings.colorOrder == 0) content += F(" selected");
+  content += F(">BRGW (Blue-Red-Green-White)</option>");
+  content += F("<option value='1'");
+  if (settings.useRGBW && settings.colorOrder == 1) content += F(" selected");
+  content += F(">RGBW (Red-Green-Blue-White)</option>");
+  content += F("<option value='2'");
+  if (settings.useRGBW && settings.colorOrder == 2) content += F(" selected");
+  content += F(">GRBW (Green-Red-Blue-White)</option>");
+  content += F("<option value='3'");
+  if (settings.useRGBW && settings.colorOrder == 3) content += F(" selected");
+  content += F(">GBRW (Green-Blue-Red-White)</option>");
+  content += F("<option value='4'");
+  if (settings.useRGBW && settings.colorOrder == 4) content += F(" selected");
+  content += F(">RBGW (Red-Blue-Green-White)</option>");
+  content += F("<option value='5'");
+  if (settings.useRGBW && settings.colorOrder == 5) content += F(" selected");
+  content += F(">BGRW (Blue-Green-Red-White)</option>");
+  content += F("<option value='6'");
+  if (settings.useRGBW && settings.colorOrder == 6) content += F(" selected");
+  content += F(">WRGB (White-Red-Green-Blue)</option>");
+  content += F("<option value='7'");
+  if (settings.useRGBW && settings.colorOrder == 7) content += F(" selected");
+  content += F(">WRBG (White-Red-Blue-Green)</option>");
+  content += F("<option value='8'");
+  if (settings.useRGBW && settings.colorOrder == 8) content += F(" selected");
+  content += F(">WGRB (White-Green-Red-Blue)</option>");
+  content += F("<option value='9'");
+  if (settings.useRGBW && settings.colorOrder == 9) content += F(" selected");
+  content += F(">WGBR (White-Green-Blue-Red)</option>");
+  content += F("<option value='10'");
+  if (settings.useRGBW && settings.colorOrder == 10) content += F(" selected");
+  content += F(">WBRG (White-Blue-Red-Green)</option>");
+  content += F("<option value='11'");
+  if (settings.useRGBW && settings.colorOrder == 11) content += F(" selected");
+  content += F(">WBGR (White-Blue-Green-Red)</option>");
+  content += F("</optgroup>");
+  content += F("</select><br>");
   
   // Color settings
   content += F("<label for='staticColor'>Static RGB Color (Hex):</label>");
@@ -1207,24 +1150,9 @@ void handleRoot() {
   content += F("'><br>");
   
   content += F("<label for='enStatColor'>Enable Static Color:</label>");
-  content += F("<input type='checkbox' id='enStatColor' name='enStatColor' onchange='updateStaticColorState()' ");
+  content += F("<input type='checkbox' id='enStatColor' name='enStatColor' ");
   content += settings.enStatColor ? F("checked") : F("");
   content += F("><br>");
-  
-  // White level (only for RGBW + static color)
-  content += F("<div id='white-level-container' style='display: ");
-  content += (settings.useRGBW && settings.enStatColor) ? F("block") : F("none");
-  content += F(";'>");
-  content += F("<div class='slider-container'>");
-  content += F("<label for='whiteLevel'>White Channel Level:</label><br>");
-  content += F("<input type='range' id='whiteLevel' name='whiteLevel' min='0' max='255' value='");
-  content += String(settings.whiteLevel);
-  content += F("' oninput='whiteLevelValue.value=this.value'>");
-  content += F("<span class='slider-value'><output id='whiteLevelValue'>");
-  content += String(settings.whiteLevel);
-  content += F("</output></span>");
-  content += F("</div>");
-  content += F("</div>");
 
   content += F("<label for='ledCycleEnabled'>Enable RGB Test Cycle:</label>");
   content += F("<input type='checkbox' id='ledCycleEnabled' name='ledCycleEnabled' ");
@@ -1238,7 +1166,7 @@ void handleRoot() {
   content += F("><br>");
   
   // Pin input fields
-  content += F("<div id='pin-container' class='pin-container'>");
+  content += F("<div id='pin-container' class='pin-container' style='padding: 10px; margin-top: 10px; background-color: #f9f9f9; border-radius: 5px;'>");
   for (int i = 0; i < NUMSTRIPS; i++) {
     content += F("<div>");
     content += F("<span class='pin-label'>Output ");
@@ -1329,21 +1257,8 @@ void handleConfig() {
     if (server.hasArg("ssid")) settings.ssid = server.arg("ssid");
     if (server.hasArg("password")) settings.password = server.arg("password");
     if (server.hasArg("staticColor")) settings.staticColor = server.arg("staticColor");
-    if (server.hasArg("whiteLevel")) settings.whiteLevel = server.arg("whiteLevel").toInt();
-    
-    // Handle channel mode (RGB vs RGBW)
-    if (server.hasArg("channelMode")) {
-      bool wasRGBW = settings.useRGBW;
-      settings.useRGBW = (server.arg("channelMode") == "4");
-      
-      // If mode changed, enforce LED count limits
-      if (wasRGBW != settings.useRGBW) {
-        int maxLeds = getMaxLedsPerStrip();
-        if (settings.numLedsPerOutput > maxLeds) {
-          settings.numLedsPerOutput = maxLeds;
-        }
-      }
-    }
+    if (server.hasArg("colorOrder")) settings.colorOrder = server.arg("colorOrder").toInt();
+    if (server.hasArg("useRGBW")) settings.useRGBW = (server.arg("useRGBW") == "1");
     
     // Update boolean settings
     settings.useWiFi = server.hasArg("useWiFi");
@@ -1417,7 +1332,7 @@ void handleConfig() {
     if (pinsChanged) {
       updateStripPins();
       // Re-initialize LED driver with updated pins
-      driver.initled(ledData, settings.pins, NUMSTRIPS, settings.numLedsPerOutput);
+      driver.initled(ledData, settings.pins, NUMSTRIPS, NUM_LEDS_PER_STRIP);
     }
     
     // Apply brightness
@@ -1433,7 +1348,9 @@ void handleConfig() {
                                  server.hasArg("staticIP") || server.hasArg("gateway") ||
                                  server.hasArg("subnet"); server.hasArg("staticIP");
     
-    if (pinsChanged || networkSettingsChanged || (!state.ledCycleEnabled && !settings.enStatColor)) {
+    bool colorConfigChanged = server.hasArg("colorOrder") || server.hasArg("useRGBW");
+    
+    if (pinsChanged || networkSettingsChanged || colorConfigChanged || (!state.ledCycleEnabled && !settings.enStatColor)) {
       delay(500); // Give the browser time to receive the redirect response
       ESP.restart();
     }
@@ -1446,13 +1363,8 @@ void handleOTAUpdate() {
   content += F("<style>");
   content += CSS_STYLES;
   content += F("</style>");
-  content += F("<script>");
-  content += JS_CODE;
-  content += F("</script>");
   content += F("</head>");
-  content += F("<body>");
-  content += F("<button id='darkModeBtn' class='dark-mode-toggle' onclick='toggleDarkMode()'>Dark Mode</button>");
-  content += F("<h1>");
+  content += F("<body><h1>");
   content += settings.nodeName;
   content += F(" - OTA Update</h1>");
   content += F("<form method='POST' action='/doUpdate' enctype='multipart/form-data'>");
