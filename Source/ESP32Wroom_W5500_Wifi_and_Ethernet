@@ -8,6 +8,8 @@
  *   - OLED status display, NeoPixel status LED, boot-button mode cycling
  *   - OTA firmware update page
  *   - Persistent settings in NVS (Preferences)
+ *
+ * Channel modes: 0 = RGB (3ch), 1 = RGBW (4ch), 2 = RGBWW/CCT (5ch)
  */
 
 // ─── Feature flags ────────────────────────────────────────────────────────────
@@ -16,8 +18,9 @@
 #define UNIQUE_SUBARTNET
 
 // ─── LED configuration ────────────────────────────────────────────────────────
-#define MAX_LEDS_RGB          680   // 170 LEDs × 4 universes
-#define MAX_LEDS_RGBW         512   // 128 LEDs × 4 universes
+#define MAX_LEDS_RGB          680   // 170 LEDs × 4 universes  (3 ch)
+#define MAX_LEDS_RGBW         512   // 128 LEDs × 4 universes  (4 ch)
+#define MAX_LEDS_RGBWW        408   // 102 LEDs × 4 universes  (5 ch)  floor(512/5)*4
 #define NUM_LEDS_PER_STRIP    680
 #define NUMSTRIPS             4
 #define UNIVERSE_SIZE_IN_CHANNEL 512
@@ -57,6 +60,13 @@ int ShifterPin = 25;
 enum LedType {
   LED_TYPE_WS2812 = 0,
   LED_TYPE_APA102 = 1
+};
+
+// ─── Channel mode enum ────────────────────────────────────────────────────────
+enum ChannelMode {
+  CHANNEL_MODE_RGB   = 0,   // 3 channels — WS2812 or APA102
+  CHANNEL_MODE_RGBW  = 1,   // 4 channels — WS2812 only
+  CHANNEL_MODE_RGBWW = 2    // 5 channels — WS2812 only (RGBCCT / RGBWW)
 };
 
 // ─── Default pins ─────────────────────────────────────────────────────────────
@@ -107,9 +117,16 @@ struct Settings {
   String  gateway           = "192.168.1.1";
   String  subnet            = "255.255.255.0";
   int     networkMode       = 0;   // 0=Ethernet 1=WiFi 2=AP 3=RGB-test 4=Static
-  bool    useRGBW           = false;
+  int     channelMode       = CHANNEL_MODE_RGB; // 0=RGB, 1=RGBW, 2=RGBWW
   int     whiteLevel        = 0;
-  int     ledType           = LED_TYPE_WS2812; // NEW: 0=WS2812, 1=APA102
+  int     white2Level       = 0;   // second white channel for RGBWW static colour
+  int     ledType           = LED_TYPE_WS2812; // 0=WS2812, 1=APA102
+
+  // Convenience helpers -------------------------------------------------------
+  bool isRGBW()   const { return channelMode == CHANNEL_MODE_RGBW;  }
+  bool isRGBWW()  const { return channelMode == CHANNEL_MODE_RGBWW; }
+  // Deprecated accessor kept so existing call-sites still compile
+  bool useRGBW_compat() const { return channelMode != CHANNEL_MODE_RGB; }
 };
 
 // ─── Runtime state ────────────────────────────────────────────────────────────
@@ -145,12 +162,13 @@ Preferences        preferences;
 artnetESP32V2      artnet = artnetESP32V2();
 
 // WS2812 driver + raw byte buffer
+// MAX_LEDS_RGB is the largest possible count (RGB mode), so size the buffer for that.
 I2SClocklessLedDriver driver;
-uint8_t ledData[4 * NUMSTRIPS * MAX_LEDS_RGB];  // raw RGB bytes for WS2812
+uint8_t ledData[NUMSTRIPS * MAX_LEDS_RGB * 5]; // worst-case: 5 bytes per LED (RGBWW)
 
 // APA102 driver + CRGB buffer
 I2SAPA102 controller(0);
-CRGB      leds[NUMSTRIPS * MAX_LEDS_RGB];        // FastLED CRGB array for APA102
+CRGB      leds[NUMSTRIPS * MAX_LEDS_RGB];      // FastLED CRGB array for APA102
 
 Settings settings;
 State    state;
@@ -168,15 +186,12 @@ void showLeds() {
   if (settings.ledType == LED_TYPE_APA102) {
     controller.showPixels();
   } else {
-    // WS2812: ledData is already the live buffer — nothing extra needed here;
-    // artnet callback calls driver.showPixels(NO_WAIT, data) directly.
-    // This helper is only used by cycleLEDs / applyStaticColor which write
-    // into leds[] (APA102) or strips[] (WS2812) respectively.
+    // WS2812: artnet callback calls driver.showPixels() directly.
+    // This helper is only used by cycleLEDs / applyStaticColor.
   }
 }
 
 // ─── Helper: set every pixel in both buffers to one colour ───────────────────
-// Used by test/static-colour code so we don't have to branch everywhere.
 void setAllLeds(uint8_t r, uint8_t g, uint8_t b) {
   if (settings.ledType == LED_TYPE_APA102) {
     int total = settings.numOutputs * settings.numLedsPerOutput;
@@ -197,7 +212,7 @@ void displayfunction(void *param) {
   subArtnet *subartnet = (subArtnet *)param;
 
   if (settings.ledType == LED_TYPE_APA102) {
-    // Unpack raw RGB bytes from ArtNet buffer into CRGB array
+    // APA102 is always RGB — unpack into CRGB array
     uint8_t *src = subartnet->data;
     int total = settings.numOutputs * settings.numLedsPerOutput;
     for (int i = 0; i < total; i++) {
@@ -207,14 +222,33 @@ void displayfunction(void *param) {
     }
     controller.showPixels();
   } else {
-    // WS2812 — pass buffer directly
+    // WS2812 — pass raw buffer directly (works for RGB, RGBW and RGBWW
+    // because the driver was initialised with the correct colour arrangement)
     driver.showPixels(NO_WAIT, subartnet->data);
   }
 }
 
 // ─── Helper accessors ─────────────────────────────────────────────────────────
-int getMaxLedsPerStrip() { return settings.useRGBW ? MAX_LEDS_RGBW : MAX_LEDS_RGB; }
-int getChannelsPerLed()  { return settings.useRGBW ? 4 : 3; }
+int getMaxLedsPerStrip() {
+  switch (settings.channelMode) {
+    case CHANNEL_MODE_RGBWW: return MAX_LEDS_RGBWW;
+    case CHANNEL_MODE_RGBW:  return MAX_LEDS_RGBW;
+    default:                 return MAX_LEDS_RGB;
+  }
+}
+
+int getChannelsPerLed() {
+  switch (settings.channelMode) {
+    case CHANNEL_MODE_RGBWW: return 5;
+    case CHANNEL_MODE_RGBW:  return 4;
+    default:                 return 3;
+  }
+}
+
+int getLedsPerUniverse() {
+  // How many LEDs fit in one 512-byte ArtNet universe
+  return UNIVERSE_SIZE_IN_CHANNEL / getChannelsPerLed();
+}
 
 // ─── Setup ────────────────────────────────────────────────────────────────────
 void setup() {
@@ -240,8 +274,13 @@ void setup() {
     saveSettings();
   }
 
-  // Reconfigure NeoPixel strip objects
-  uint16_t pixelType = settings.useRGBW ? (NEO_GRBW + NEO_KHZ800) : (NEO_BRG + NEO_KHZ800);
+  // Reconfigure NeoPixel strip objects for static/test colour use
+  uint32_t pixelType;
+  switch (settings.channelMode) {
+    case CHANNEL_MODE_RGBWW: pixelType = NEO_GRBW + NEO_KHZ800; break; // 5-ch not natively in Adafruit; RGBW used for basic test
+    case CHANNEL_MODE_RGBW:  pixelType = NEO_GRBW + NEO_KHZ800; break;
+    default:                 pixelType = NEO_BRG  + NEO_KHZ800; break;
+  }
   for (int i = 0; i < NUMSTRIPS; i++) {
     strips[i].updateType(pixelType);
     strips[i].updateLength(settings.numLedsPerOutput);
@@ -255,11 +294,18 @@ void setup() {
     strips[i].show();
   }
 
-  // ── Initialise the correct LED driver ────────────────────────────────────
+// ── Initialise the correct LED driver ────────────────────────────────────
+  // The library requires uint8_t* for the pins array; settings.pins is int[].
+  // Copy into a local uint8_t array before every driver init call.
+  uint8_t activePins[NUMSTRIPS];
+  for (int i = 0; i < NUMSTRIPS; i++) activePins[i] = (uint8_t)settings.pins[i];
+
   if (settings.ledType == LED_TYPE_APA102) {
     displayStatus("Initializing...", "APA102 driver");
     Serial.println("LED type: APA102");
-    controller.initled(leds, settings.pins, APA102_CLOCK_PIN,
+    int activePinsInt[NUMSTRIPS];
+    for (int i = 0; i < NUMSTRIPS; i++) activePinsInt[i] = settings.pins[i];
+    controller.initled(leds, activePinsInt, APA102_CLOCK_PIN,
                        settings.numOutputs, settings.numLedsPerOutput);
     controller.setBrightness(settings.ledBrightness);
     // Quick white flash to confirm wiring
@@ -268,13 +314,41 @@ void setup() {
     delay(200);
     fill_solid(leds, settings.numOutputs * settings.numLedsPerOutput, CRGB::Black);
     controller.showPixels();
+
   } else {
-    displayStatus("Initializing...", "WS2812 driver");
-    Serial.println("LED type: WS2812");
-    colorarrangment colorOrder = settings.useRGBW ? ORDER_GRBW : ORDER_GRB;
-    driver.initled(ledData, settings.pins, NUMSTRIPS,
-                   settings.numLedsPerOutput, colorOrder);
-    driver.setBrightness(settings.ledBrightness);
+    // WS2812 family ─────────────────────────────────────────────────────────
+    // Correct overload: initled(uint8_t* leds, uint8_t* pins,
+    //                           uint8_t numStrips, uint16_t numLedPerStrip,
+    //                           ColorArrangement cArr)
+    switch (settings.channelMode) {
+
+      case CHANNEL_MODE_RGBWW:
+        displayStatus("Initializing...", "WS2812 RGBWW (5ch)");
+        Serial.println("LED type: WS2812 RGBWW/CCT (5ch)");
+        driver.initled((uint8_t*)ledData, activePins,
+                       (uint8_t)NUMSTRIPS, (uint16_t)settings.numLedsPerOutput,
+                       ORDER_RGBCCT);
+        driver.setBrightness(settings.ledBrightness);
+        break;
+
+      case CHANNEL_MODE_RGBW:
+        displayStatus("Initializing...", "WS2812 RGBW (4ch)");
+        Serial.println("LED type: WS2812 RGBW (4ch)");
+        driver.initled((uint8_t*)ledData, activePins,
+                       (uint8_t)NUMSTRIPS, (uint16_t)settings.numLedsPerOutput,
+                       ORDER_GRBW);
+        driver.setBrightness(settings.ledBrightness);
+        break;
+
+      default:
+        displayStatus("Initializing...", "WS2812 RGB (3ch)");
+        Serial.println("LED type: WS2812 RGB (3ch)");
+        driver.initled((uint8_t*)ledData, activePins,
+                       (uint8_t)NUMSTRIPS, (uint16_t)settings.numLedsPerOutput,
+                       ORDER_GRB);
+        driver.setBrightness(settings.ledBrightness);
+        break;
+    }
   }
 
   // ── Networking ────────────────────────────────────────────────────────────
@@ -299,15 +373,15 @@ void setup() {
     IPAddress activeIP = (settings.networkMode == 1) ? WiFi.localIP() : ETH.localIP();
 
     String ipStr = activeIP.toString();
-    int ledsPerUniverse = settings.useRGBW ? 128 : 170;
-    int universesPerOutput = (settings.numLedsPerOutput + ledsPerUniverse - 1) / ledsPerUniverse;
+    int lpuv = getLedsPerUniverse();
+    int universesPerOutput = (settings.numLedsPerOutput + lpuv - 1) / lpuv;
     String ledsInfo = "LED:" + String(settings.numLedsPerOutput) +
                       " Uni:" + String(universesPerOutput) +
                       " Out:" + String(settings.numOutputs);
     displayStatus(settings.nodeName, ipStr, ledsInfo);
 
-    int universeSize    = settings.useRGBW ? (128 * 4) : (170 * 3);
-    int channelsPerLed  = getChannelsPerLed();
+    int universeSize   = lpuv * getChannelsPerLed();
+    int channelsPerLed = getChannelsPerLed();
 
     artnet.addSubArtnet(
       settings.startUniverse,
@@ -367,8 +441,8 @@ void loop() {
       } else {
         if (wasDisconnected || !lastConnectionState) {
           setStatusLED(0, 255, 0);
-          int ledsPerUniverse = settings.useRGBW ? 128 : 170;
-          int universesPerOutput = (settings.numLedsPerOutput + ledsPerUniverse - 1) / ledsPerUniverse;
+          int lpuv = getLedsPerUniverse();
+          int universesPerOutput = (settings.numLedsPerOutput + lpuv - 1) / lpuv;
           String ledsInfo = "LED:" + String(settings.numLedsPerOutput) +
                             " Uni:" + String(universesPerOutput) +
                             " Out:" + String(settings.numOutputs);
@@ -396,8 +470,8 @@ void loop() {
           setStatusLED(0, 255, 0);
           String ipInfo = settings.useStaticIP ? "Static: " + settings.staticIP
                                                 : "DHCP: " + ETH.localIP().toString();
-          int ledsPerUniverse = settings.useRGBW ? 128 : 170;
-          int universesPerOutput = (settings.numLedsPerOutput + ledsPerUniverse - 1) / ledsPerUniverse;
+          int lpuv = getLedsPerUniverse();
+          int universesPerOutput = (settings.numLedsPerOutput + lpuv - 1) / lpuv;
           String ledsInfo = "LED:" + String(settings.numLedsPerOutput) +
                             " Uni:" + String(universesPerOutput) +
                             " Out:" + String(settings.numOutputs);
@@ -450,9 +524,19 @@ void loadSettings() {
   settings.gateway          = preferences.getString("gateway",    settings.gateway);
   settings.subnet           = preferences.getString("subnet",     settings.subnet);
   settings.networkMode      = preferences.getInt("networkMode",   -1);
-  settings.useRGBW          = preferences.getBool("useRGBW",      settings.useRGBW);
   settings.whiteLevel       = preferences.getInt("whiteLevel",    settings.whiteLevel);
-  settings.ledType          = preferences.getInt("ledType",       settings.ledType); // NEW
+  settings.white2Level      = preferences.getInt("white2Level",   settings.white2Level);
+  settings.ledType          = preferences.getInt("ledType",       settings.ledType);
+
+  // ── channelMode migration ─────────────────────────────────────────────────
+  // If a fresh NVS has no "channelMode" key but has the old "useRGBW" bool,
+  // promote it so existing devices keep their configuration on first upgrade.
+  if (preferences.isKey("channelMode")) {
+    settings.channelMode = preferences.getInt("channelMode", CHANNEL_MODE_RGB);
+  } else {
+    bool legacyRGBW = preferences.getBool("useRGBW", false);
+    settings.channelMode = legacyRGBW ? CHANNEL_MODE_RGBW : CHANNEL_MODE_RGB;
+  }
 
   if (settings.networkMode == -1)
     settings.networkMode = settings.useWiFi ? 1 : 0;
@@ -486,9 +570,10 @@ void saveSettings() {
   preferences.putString("gateway",     settings.gateway);
   preferences.putString("subnet",      settings.subnet);
   preferences.putInt("networkMode",    settings.networkMode);
-  preferences.putBool("useRGBW",       settings.useRGBW);
+  preferences.putInt("channelMode",    settings.channelMode);  // replaces useRGBW
   preferences.putInt("whiteLevel",     settings.whiteLevel);
-  preferences.putInt("ledType",        settings.ledType);   // NEW
+  preferences.putInt("white2Level",    settings.white2Level);
+  preferences.putInt("ledType",        settings.ledType);
   for (int i = 0; i < NUMSTRIPS; i++) {
     char key[10]; sprintf(key, "pin%d", i);
     preferences.putInt(key, settings.pins[i]);
@@ -566,7 +651,21 @@ void applyStaticColor() {
   uint8_t g = (color >>  8) & 0xFF;
   uint8_t b =  color        & 0xFF;
   setStatusLED(r, g, b);
-  setAllLeds(r, g, b);
+
+  if (settings.channelMode == CHANNEL_MODE_RGBWW && settings.ledType == LED_TYPE_WS2812) {
+    // Write 5-byte pixels directly into ledData for RGBWW
+    int total = settings.numOutputs * settings.numLedsPerOutput;
+    for (int i = 0; i < total; i++) {
+      ledData[i * 5 + 0] = r;
+      ledData[i * 5 + 1] = g;
+      ledData[i * 5 + 2] = b;
+      ledData[i * 5 + 3] = settings.whiteLevel;
+      ledData[i * 5 + 4] = settings.white2Level;
+    }
+    driver.showPixels(NO_WAIT, ledData);
+  } else {
+    setAllLeds(r, g, b);
+  }
 }
 
 // ─── Colour selection (boot-button standalone mode) ───────────────────────────
@@ -736,7 +835,7 @@ input[type='submit']:hover{background-color:var(--button-hover);}
 .pin-input{width:60px!important;display:inline-block;margin-right:10px;}
 .pin-container{margin:10px 0;padding:10px;background-color:var(--input-bg);border-radius:5px;}
 .pin-label{display:inline-block;width:100px;text-align:left;}
-.radio-group{display:flex;justify-content:center;gap:20px;margin:10px 0;}
+.radio-group{display:flex;justify-content:center;gap:20px;margin:10px 0;flex-wrap:wrap;}
 .radio-option{display:flex;align-items:center;gap:5px;}
 .slider-container{margin:15px 0;}
 .slider-value{display:inline-block;min-width:50px;text-align:center;font-weight:bold;}
@@ -756,22 +855,30 @@ function toggleStaticIP(){
   document.getElementById('static-ip-container').style.display=
     document.getElementById('useStaticIP').checked?'block':'none';
 }
+function getChannelMode(){
+  return parseInt(document.querySelector('input[name="channelMode"]:checked').value);
+}
 function updateChannelMode(){
-  var isRGBW=document.querySelector('input[name="channelMode"]:checked').value==='4';
+  var cm=getChannelMode();
   var staticColorEnabled=document.getElementById('enStatColor').checked;
+  // White channel 1 — visible for RGBW and RGBWW when static colour is on
   document.getElementById('white-level-container').style.display=
-    (isRGBW&&staticColorEnabled)?'block':'none';
+    (cm>=1&&staticColorEnabled)?'block':'none';
+  // White channel 2 — visible for RGBWW only when static colour is on
+  document.getElementById('white2-level-container').style.display=
+    (cm===2&&staticColorEnabled)?'block':'none';
   updateUniverseSlider();
 }
 function updateStaticColorState(){
-  var isRGBW=document.querySelector('input[name="channelMode"]:checked').value==='4';
-  document.getElementById('white-level-container').style.display=
-    (isRGBW&&document.getElementById('enStatColor').checked)?'block':'none';
+  var cm=getChannelMode();
+  var on=document.getElementById('enStatColor').checked;
+  document.getElementById('white-level-container').style.display=(cm>=1&&on)?'block':'none';
+  document.getElementById('white2-level-container').style.display=(cm===2&&on)?'block':'none';
 }
 function updateUniverseSlider(){
-  var isRGBW=document.querySelector('input[name="channelMode"]:checked').value==='4';
+  var cm=getChannelMode();
+  var ledsPerUniverse=(cm===2)?102:(cm===1?128:170);
   var universes=parseInt(document.getElementById('numLedsSlider').value);
-  var ledsPerUniverse=isRGBW?128:170;
   var totalLeds=universes*ledsPerUniverse;
   document.getElementById('numLedsValue').textContent=
     universes+' universe'+(universes>1?'s':'')+' ('+totalLeds+' LEDs)';
@@ -785,12 +892,12 @@ function updateOutputSlider(){
 function updateLedTypeUI(){
   var isAPA102=document.querySelector('input[name="ledType"]:checked').value==='1';
   document.getElementById('apa102-clock-info').style.display=isAPA102?'block':'none';
-  // APA102 is always RGB — hide RGBW option when APA102 selected
+  // APA102 is always RGB — hide channel mode selector when APA102 is selected
   document.getElementById('rgbw-container').style.display=isAPA102?'none':'block';
   if(isAPA102){
-    // Force RGB mode for APA102
-    document.getElementById('rgb3ch').checked=true;
+    document.getElementById('ch0').checked=true;
     document.getElementById('white-level-container').style.display='none';
+    document.getElementById('white2-level-container').style.display='none';
   }
 }
 function toggleDarkMode(){
@@ -832,7 +939,7 @@ void handleRoot() {
                "<input type='text' id='nodename' name='nodename' value='");
   content += settings.nodeName; content += F("'><br>");
 
-  // ── LED Type selector (NEW) ───────────────────────────────────────────────
+  // ── LED Type selector ─────────────────────────────────────────────────────
   content += F("<div class='section-divider'>LED Strip Type</div>");
   content += F("<div class='radio-group'>");
   content += F("<div class='radio-option'>"
@@ -851,28 +958,39 @@ void handleRoot() {
                "&#9432;&nbsp;APA102 uses a shared SPI clock on GPIO <strong>");
   content += String(APA102_CLOCK_PIN);
   content += F("</strong>. Data pins are configured below."
-               " RGBW mode is not available for APA102.</div>");
+               " Channel mode selection is not available for APA102 (always RGB).</div>");
 
-  // ── Channel mode (hidden for APA102) ─────────────────────────────────────
+  // ── Channel mode — hidden for APA102 ─────────────────────────────────────
   content += F("<div id='rgbw-container' style='display:");
   content += (settings.ledType == LED_TYPE_APA102) ? F("none") : F("block");
   content += F(";'>");
   content += F("<div class='section-divider'>Channel Mode</div>");
   content += F("<div class='radio-group'>");
+
+  // RGB (3ch)
   content += F("<div class='radio-option'>"
-               "<input type='radio' id='rgb3ch' name='channelMode' value='3' onchange='updateChannelMode()' ");
-  content += !settings.useRGBW ? F("checked") : F("");
-  content += F("><label for='rgb3ch'>RGB (3 ch)</label></div>");
+               "<input type='radio' id='ch0' name='channelMode' value='0' onchange='updateChannelMode()' ");
+  content += (settings.channelMode == CHANNEL_MODE_RGB) ? F("checked") : F("");
+  content += F("><label for='ch0'>RGB (3 ch)</label></div>");
+
+  // RGBW (4ch)
   content += F("<div class='radio-option'>"
-               "<input type='radio' id='rgbw4ch' name='channelMode' value='4' onchange='updateChannelMode()' ");
-  content += settings.useRGBW ? F("checked") : F("");
-  content += F("><label for='rgbw4ch'>RGBW (4 ch)</label></div>");
-  content += F("</div></div>"); // close rgbw-container
+               "<input type='radio' id='ch1' name='channelMode' value='1' onchange='updateChannelMode()' ");
+  content += (settings.channelMode == CHANNEL_MODE_RGBW) ? F("checked") : F("");
+  content += F("><label for='ch1'>RGBW (4 ch)</label></div>");
+
+  // RGBWW / CCT (5ch)
+  content += F("<div class='radio-option'>"
+               "<input type='radio' id='ch2' name='channelMode' value='2' onchange='updateChannelMode()' ");
+  content += (settings.channelMode == CHANNEL_MODE_RGBWW) ? F("checked") : F("");
+  content += F("><label for='ch2'>RGBWW / CCT (5 ch)</label></div>");
+
+  content += F("</div></div>"); // close radio-group + rgbw-container
 
   // ── Universe / LED slider ─────────────────────────────────────────────────
   content += F("<div class='section-divider'>ArtNet Configuration</div>");
-  int ledsPerUniverse    = settings.useRGBW ? 128 : 170;
-  int currentUniverses   = max(1, min(4, (settings.numLedsPerOutput + ledsPerUniverse - 1) / ledsPerUniverse));
+  int lpuv             = getLedsPerUniverse();
+  int currentUniverses = max(1, min(4, (settings.numLedsPerOutput + lpuv - 1) / lpuv));
   content += F("<div class='slider-container'>"
                "<label for='numLedsSlider'>LEDs per output:</label><br>"
                "<input type='range' id='numLedsSlider' min='1' max='4' step='1' value='");
@@ -920,17 +1038,32 @@ void handleRoot() {
                " onchange='updateStaticColorState()' ");
   content += settings.enStatColor ? F("checked") : F(""); content += F("><br>");
 
-  // White level (WS2812 RGBW only)
+  // White channel 1 (RGBW and RGBWW)
+  bool showW1 = (settings.channelMode >= CHANNEL_MODE_RGBW) && settings.enStatColor
+                 && (settings.ledType == LED_TYPE_WS2812);
   content += F("<div id='white-level-container' style='display:");
-  content += (settings.useRGBW && settings.enStatColor && settings.ledType == LED_TYPE_WS2812)
-             ? F("block") : F("none");
+  content += showW1 ? F("block") : F("none");
   content += F(";'><div class='slider-container'>"
-               "<label for='whiteLevel'>White Channel Level:</label><br>"
+               "<label for='whiteLevel'>White Channel Level (W1):</label><br>"
                "<input type='range' id='whiteLevel' name='whiteLevel' min='0' max='255' value='");
   content += String(settings.whiteLevel);
   content += F("' oninput='whiteLevelValue.value=this.value'>"
                "<span class='slider-value'><output id='whiteLevelValue'>");
   content += String(settings.whiteLevel);
+  content += F("</output></span></div></div>");
+
+  // White channel 2 (RGBWW only)
+  bool showW2 = (settings.channelMode == CHANNEL_MODE_RGBWW) && settings.enStatColor
+                 && (settings.ledType == LED_TYPE_WS2812);
+  content += F("<div id='white2-level-container' style='display:");
+  content += showW2 ? F("block") : F("none");
+  content += F(";'><div class='slider-container'>"
+               "<label for='white2Level'>White Channel Level (W2 / CCT):</label><br>"
+               "<input type='range' id='white2Level' name='white2Level' min='0' max='255' value='");
+  content += String(settings.white2Level);
+  content += F("' oninput='white2LevelValue.value=this.value'>"
+               "<span class='slider-value'><output id='white2LevelValue'>");
+  content += String(settings.white2Level);
   content += F("</output></span></div></div>");
 
   content += F("<label for='ledCycleEnabled'>Enable RGB Test Cycle:</label>"
@@ -1007,21 +1140,24 @@ void handleConfig() {
   if (server.hasArg("password"))      settings.password         = server.arg("password");
   if (server.hasArg("staticColor"))   settings.staticColor      = server.arg("staticColor");
   if (server.hasArg("whiteLevel"))    settings.whiteLevel       = server.arg("whiteLevel").toInt();
+  if (server.hasArg("white2Level"))   settings.white2Level      = server.arg("white2Level").toInt();
 
   // LED type
   if (server.hasArg("ledType"))
     settings.ledType = server.arg("ledType").toInt();
 
   // Channel mode (only meaningful for WS2812)
-  if (server.hasArg("channelMode") && settings.ledType == LED_TYPE_WS2812) {
-    bool wasRGBW = settings.useRGBW;
-    settings.useRGBW = (server.arg("channelMode") == "4");
-    if (wasRGBW != settings.useRGBW) {
+  if (settings.ledType == LED_TYPE_APA102) {
+    settings.channelMode = CHANNEL_MODE_RGB; // APA102 is always RGB
+  } else if (server.hasArg("channelMode")) {
+    int newMode = server.arg("channelMode").toInt();
+    if (newMode < CHANNEL_MODE_RGB || newMode > CHANNEL_MODE_RGBWW) newMode = CHANNEL_MODE_RGB;
+    if (settings.channelMode != newMode) {
+      settings.channelMode = newMode;
+      // Clamp LED count to new maximum
       int maxLeds = getMaxLedsPerStrip();
       if (settings.numLedsPerOutput > maxLeds) settings.numLedsPerOutput = maxLeds;
     }
-  } else if (settings.ledType == LED_TYPE_APA102) {
-    settings.useRGBW = false; // APA102 is always RGB
   }
 
   settings.useWiFi         = server.hasArg("useWiFi");
