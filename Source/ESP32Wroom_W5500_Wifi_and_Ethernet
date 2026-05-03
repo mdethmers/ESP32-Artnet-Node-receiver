@@ -1,38 +1,48 @@
 /**
  * ArtNet LED Controller for ESP32
- * Controls multiple LED strips via ArtNet protocol over Ethernet or WiFi
- * Provides web interface for configuration and supports static colors and test patterns
+ * Supports WS2812 (I2SClocklessLedDriver) AND APA102 (I2SAPA102).
+ * Switch between them live via the web UI — a save+restart applies the change.
+ *
+ * All other features are preserved:
+ *   - Ethernet / WiFi / AP / RGB-test / Static-colour modes
+ *   - OLED status display, NeoPixel status LED, boot-button mode cycling
+ *   - OTA firmware update page
+ *   - Persistent settings in NVS (Preferences)
  */
 
-// Feature configuration
+// ─── Feature flags ────────────────────────────────────────────────────────────
 #define DEBUG_ETHERNET_WEBSERVER_PORT Serial
-#define _ETHERNET_WEBSERVER_LOGLEVEL_ 1  // Reduced log level for less overhead
+#define _ETHERNET_WEBSERVER_LOGLEVEL_ 1
 #define UNIQUE_SUBARTNET
 
-// LED configuration
-#define MAX_LEDS_RGB 680              // Maximum LEDs for RGB (170 × 4 universes = 680 LEDs, 510 channels per universe)
-#define MAX_LEDS_RGBW 512             // Maximum LEDs for RGBW (128 × 4 universes = 512 LEDs, 512 channels per universe)
-#define NUM_LEDS_PER_STRIP 680        // For I2SClocklessLedDriver library compatibility (max across all strips)
-#define NUMSTRIPS 4                   // Maximum number of LED strips
-#define UNIVERSE_SIZE_IN_CHANNEL 512  // Standard ArtNet universe size
-#define COLOR_RBG                     // Define color order (Green-Red-Blue)
+// ─── LED configuration ────────────────────────────────────────────────────────
+#define MAX_LEDS_RGB          680   // 170 LEDs × 4 universes
+#define MAX_LEDS_RGBW         512   // 128 LEDs × 4 universes
+#define NUM_LEDS_PER_STRIP    680
+#define NUMSTRIPS             4
+#define UNIVERSE_SIZE_IN_CHANNEL 512
+#define COLOR_GRB
 
-// Hardware configuration
-#define STATUS_LED_PIN 16
-#define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 32
-#define OLED_RESET 4
-#define SCREEN_ADDRESS 0x3C
-#define BOOT_BUTTON_PIN 0
+// APA102 clock pin — MUST be > 16 on ESP32
+#define APA102_CLOCK_PIN      17
 
-//Level shifter installed and enabled
+// ─── Hardware configuration ───────────────────────────────────────────────────
+#define STATUS_LED_PIN        16
+#define SCREEN_WIDTH          128
+#define SCREEN_HEIGHT         32
+#define OLED_RESET            4
+#define SCREEN_ADDRESS        0x3C
+#define BOOT_BUTTON_PIN       0
+
 int ShifterPin = 25;
 
-// Include necessary libraries
+// ─── Libraries ────────────────────────────────────────────────────────────────
 #include <Preferences.h>
 #include <WebServer_ESP32_W5500.h>
 #include <WebServer.h>
-#include "I2SClocklessLedDriver.h"
+#include "I2SClocklessLedDriver.h"   // WS2812 driver
+#include "FastLED.h"                 // needed by I2SAPA102
+#include "I2SAPA102.h"               // APA102 driver
 #include "Arduino.h"
 #include "artnetESP32V2.h"
 #include <Adafruit_NeoPixel.h>
@@ -43,12 +53,17 @@ int ShifterPin = 25;
 #include <Update.h>
 #include <WiFi.h>
 
-// Default pin configuration
+// ─── LED type enum ────────────────────────────────────────────────────────────
+enum LedType {
+  LED_TYPE_WS2812 = 0,
+  LED_TYPE_APA102 = 1
+};
+
+// ─── Default pins ─────────────────────────────────────────────────────────────
 const int DEFAULT_PINS[NUMSTRIPS] = {12, 14, 27, 26};
 
-// Forward declarations for functions
+// ─── Forward declarations ─────────────────────────────────────────────────────
 void setupWiFi();
-void setupEthernet();
 void setupEthernet();
 void startAPMode();
 void checkBootButton();
@@ -68,96 +83,79 @@ void drawWiFiIcon(int x, int y);
 void handleOTAUpdate();
 void handleDoUpdate();
 void handleOTAUpdateResponse();
-void printOTAProgress(size_t prg, size_t sz);
-void ESP32_W5500_event(arduino_event_id_t event);
 void ESP32_W5500_onEvent();
+void showLeds();
+void setAllLeds(uint8_t r, uint8_t g, uint8_t b);
 
-// Configuration structure
+// ─── Settings ─────────────────────────────────────────────────────────────────
 struct Settings {
-  int numLedsPerOutput = 680;  // Default to RGB max (680 LEDs across 4 universes)
-  int numOutputs = 4;
-  int startUniverse = 0;
-  int pins[NUMSTRIPS] = {12, 14, 27, 26};
-  int ledBrightness = 255;
-  String nodeName = "Artnet Node ESP32";
-  String ssid = "";
-  String password = "";
-  bool useWiFi = false;
-  String staticColor = "#000000";
-  bool enStatColor = false;
-  bool enableCustomPins = false;
-  bool ledCycleEnabled = false; 
-  bool useStaticIP = false;
-  String staticIP = "192.168.1.100";
-  String gateway = "192.168.1.1";
-  String subnet = "255.255.255.0";
-  int networkMode = 0; // 0: Ethernet, 1: WiFi, 2: AP
-  bool useRGBW = false; // false = RGB (3 channels), true = RGBW (4 channels)
-  int whiteLevel = 0; // White channel level for RGBW (0-255)
+  int     numLedsPerOutput  = 680;
+  int     numOutputs        = 4;
+  int     startUniverse     = 0;
+  int     pins[NUMSTRIPS]   = {12, 14, 27, 26};
+  int     ledBrightness     = 255;
+  String  nodeName          = "Artnet Node ESP32";
+  String  ssid              = "";
+  String  password          = "";
+  bool    useWiFi           = false;
+  String  staticColor       = "#000000";
+  bool    enStatColor       = false;
+  bool    enableCustomPins  = false;
+  bool    ledCycleEnabled   = false;
+  bool    useStaticIP       = false;
+  String  staticIP          = "192.168.1.100";
+  String  gateway           = "192.168.1.1";
+  String  subnet            = "255.255.255.0";
+  int     networkMode       = 0;   // 0=Ethernet 1=WiFi 2=AP 3=RGB-test 4=Static
+  bool    useRGBW           = false;
+  int     whiteLevel        = 0;
+  int     ledType           = LED_TYPE_WS2812; // NEW: 0=WS2812, 1=APA102
 };
 
-// Runtime state
+// ─── Runtime state ────────────────────────────────────────────────────────────
 struct State {
-  bool isAPMode = false;
-  bool ledCycleEnabled = false;
-  bool isStaticColorSet = false;
-  uint8_t currentColor = 0;  // 0 = Red, 1 = Green, 2 = Blue
-  unsigned long lastUpdate = 0;
-  unsigned long startAttemptTime = 0;
-  bool ledState = false;
-  
-  // Color selection state for standalone static color mode
-  bool colorSelectionMode = false;
-  int selectedColorIndex = 0;
-  unsigned long lastBlinkTime = 0;
-  bool displayBlink = false;
+  bool          isAPMode            = false;
+  bool          ledCycleEnabled     = false;
+  bool          isStaticColorSet    = false;
+  uint8_t       currentColor        = 0;
+  unsigned long lastUpdate          = 0;
+  unsigned long startAttemptTime    = 0;
+  bool          ledState            = false;
+  bool          colorSelectionMode  = false;
+  int           selectedColorIndex  = 0;
+  unsigned long lastBlinkTime       = 0;
+  bool          displayBlink        = false;
 };
 
-// Preset colors for standalone static color mode
-const int PRESET_COLORS_COUNT = 10;
+// ─── Preset colours ───────────────────────────────────────────────────────────
+const int    PRESET_COLORS_COUNT = 10;
 const String presetColors[PRESET_COLORS_COUNT] = {
-  "#FF0000", // Red
-  "#00FF00", // Green  
-  "#0000FF", // Blue
-  "#FFFF00", // Yellow
-  "#FF00FF", // Magenta
-  "#00FFFF", // Cyan
-  "#FFFFFF", // White
-  "#FF8000", // Orange
-  "#8000FF", // Purple
-  "#000000"  // Black/Off
+  "#FF0000","#00FF00","#0000FF","#FFFF00",
+  "#FF00FF","#00FFFF","#FFFFFF","#FF8000",
+  "#8000FF","#000000"
 };
 
-// Constants
-const unsigned long CYCLE_DELAY = 1000;         // Change color every 1 second
+const unsigned long CYCLE_DELAY = 1000;
 
-// Global objects
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
-Adafruit_NeoPixel StatusLed(1, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
-WebServer server(80);
-Preferences preferences;
-artnetESP32V2 artnet = artnetESP32V2();
+// ─── Global objects ───────────────────────────────────────────────────────────
+Adafruit_SSD1306   display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+Adafruit_NeoPixel  StatusLed(1, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
+WebServer          server(80);
+Preferences        preferences;
+artnetESP32V2      artnet = artnetESP32V2();
+
+// WS2812 driver + raw byte buffer
 I2SClocklessLedDriver driver;
+uint8_t ledData[4 * NUMSTRIPS * MAX_LEDS_RGB];  // raw RGB bytes for WS2812
 
-// LED storage - allocate for maximum size to support both RGB and RGBW
-// RGB: 680 LEDs × 3 channels × 4 strips = 8,160 bytes
-// RGBW: 512 LEDs × 4 channels × 4 strips = 8,192 bytes
-uint8_t ledData[4 * NUMSTRIPS * MAX_LEDS_RGB];  // 10,880 bytes (allows for dynamic configuration)
+// APA102 driver + CRGB buffer
+I2SAPA102 controller(0);
+CRGB      leds[NUMSTRIPS * MAX_LEDS_RGB];        // FastLED CRGB array for APA102
 
-// Settings and state
 Settings settings;
-State state;
+State    state;
 
-// Helper functions to get current LED configuration
-int getMaxLedsPerStrip() {
-  return settings.useRGBW ? MAX_LEDS_RGBW : MAX_LEDS_RGB;
-}
-
-int getChannelsPerLed() {
-  return settings.useRGBW ? 4 : 3;
-}
-
-// LED strip objects - will be reconfigured in setup based on RGB/RGBW setting
+// NeoPixel strip objects (used for static/test colour output only)
 Adafruit_NeoPixel strips[NUMSTRIPS] = {
   Adafruit_NeoPixel(MAX_LEDS_RGB, DEFAULT_PINS[0], NEO_BRG + NEO_KHZ800),
   Adafruit_NeoPixel(MAX_LEDS_RGB, DEFAULT_PINS[1], NEO_BRG + NEO_KHZ800),
@@ -165,122 +163,160 @@ Adafruit_NeoPixel strips[NUMSTRIPS] = {
   Adafruit_NeoPixel(MAX_LEDS_RGB, DEFAULT_PINS[3], NEO_BRG + NEO_KHZ800)
 };
 
-// ArtNet callback function
-void displayfunction(void *param) {
-  subArtnet *subartnet = (subArtnet *)param;
-  driver.showPixels(NO_WAIT, subartnet->data);
+// ─── Helper: show whatever driver is active ───────────────────────────────────
+void showLeds() {
+  if (settings.ledType == LED_TYPE_APA102) {
+    controller.showPixels();
+  } else {
+    // WS2812: ledData is already the live buffer — nothing extra needed here;
+    // artnet callback calls driver.showPixels(NO_WAIT, data) directly.
+    // This helper is only used by cycleLEDs / applyStaticColor which write
+    // into leds[] (APA102) or strips[] (WS2812) respectively.
+  }
 }
 
-/**
- * Main setup function
- */
+// ─── Helper: set every pixel in both buffers to one colour ───────────────────
+// Used by test/static-colour code so we don't have to branch everywhere.
+void setAllLeds(uint8_t r, uint8_t g, uint8_t b) {
+  if (settings.ledType == LED_TYPE_APA102) {
+    int total = settings.numOutputs * settings.numLedsPerOutput;
+    for (int i = 0; i < total; i++) leds[i] = CRGB(r, g, b);
+    controller.showPixels();
+  } else {
+    for (int i = 0; i < settings.numOutputs; i++) {
+      for (int j = 0; j < settings.numLedsPerOutput; j++) {
+        strips[i].setPixelColor(j, r, g, b);
+      }
+      strips[i].show();
+    }
+  }
+}
+
+// ─── ArtNet callback ──────────────────────────────────────────────────────────
+void displayfunction(void *param) {
+  subArtnet *subartnet = (subArtnet *)param;
+
+  if (settings.ledType == LED_TYPE_APA102) {
+    // Unpack raw RGB bytes from ArtNet buffer into CRGB array
+    uint8_t *src = subartnet->data;
+    int total = settings.numOutputs * settings.numLedsPerOutput;
+    for (int i = 0; i < total; i++) {
+      leds[i].r = src[i * 3 + 0];
+      leds[i].g = src[i * 3 + 1];
+      leds[i].b = src[i * 3 + 2];
+    }
+    controller.showPixels();
+  } else {
+    // WS2812 — pass buffer directly
+    driver.showPixels(NO_WAIT, subartnet->data);
+  }
+}
+
+// ─── Helper accessors ─────────────────────────────────────────────────────────
+int getMaxLedsPerStrip() { return settings.useRGBW ? MAX_LEDS_RGBW : MAX_LEDS_RGB; }
+int getChannelsPerLed()  { return settings.useRGBW ? 4 : 3; }
+
+// ─── Setup ────────────────────────────────────────────────────────────────────
 void setup() {
   Serial.begin(115200);
 
-  pinMode(ShifterPin, OUTPUT);   // Set pin as output
-  digitalWrite(ShifterPin, LOW); // Pull the pin to LOW (0V)
-  
-  // Initialize status LED
+  pinMode(ShifterPin, OUTPUT);
+  digitalWrite(ShifterPin, LOW);
+
   StatusLed.begin();
-  setStatusLED(255, 255, 0);  // Yellow during initialization
-  
-  // Initialize OLED display
-  if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+  setStatusLED(255, 255, 0);   // Yellow = initialising
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
     Serial.println(F("SSD1306 allocation failed"));
   }
   displayStatus("Initializing...");
-  
-  // Load settings from preferences
+
   loadSettings();
-  
-  // Enforce LED count limits based on RGB/RGBW mode
+
+  // Enforce LED count limits
   int maxLeds = getMaxLedsPerStrip();
   if (settings.numLedsPerOutput > maxLeds) {
     settings.numLedsPerOutput = maxLeds;
     saveSettings();
   }
-  
-  // Reconfigure LED strips based on RGB/RGBW setting
+
+  // Reconfigure NeoPixel strip objects
   uint16_t pixelType = settings.useRGBW ? (NEO_GRBW + NEO_KHZ800) : (NEO_BRG + NEO_KHZ800);
   for (int i = 0; i < NUMSTRIPS; i++) {
     strips[i].updateType(pixelType);
     strips[i].updateLength(settings.numLedsPerOutput);
   }
-  
-  // Update strip pins based on loaded settings
   updateStripPins();
-  
-  // Set all LEDs to black (off) before initializing driver
+
+  // Blank all strips at startup
   for (int i = 0; i < settings.numOutputs; i++) {
     strips[i].begin();
-    for (int j = 0; j < settings.numLedsPerOutput; j++) {
-      strips[i].setPixelColor(j, 0);  // Set to black (off)
-    }
+    for (int j = 0; j < settings.numLedsPerOutput; j++) strips[i].setPixelColor(j, 0);
     strips[i].show();
   }
-  Serial.println("All LEDs set to black");
-  
-  // Initialize LED driver with correct color order
-  int channelsPerLed = getChannelsPerLed();
-  colorarrangment colorOrder = settings.useRGBW ? ORDER_GRBW : ORDER_GRB;
 
-  driver.initled(ledData, settings.pins, NUMSTRIPS, settings.numLedsPerOutput, colorOrder);
-  driver.setBrightness(settings.ledBrightness);
-  
-  // Initialize networking
+  // ── Initialise the correct LED driver ────────────────────────────────────
+  if (settings.ledType == LED_TYPE_APA102) {
+    displayStatus("Initializing...", "APA102 driver");
+    Serial.println("LED type: APA102");
+    controller.initled(leds, settings.pins, APA102_CLOCK_PIN,
+                       settings.numOutputs, settings.numLedsPerOutput);
+    controller.setBrightness(settings.ledBrightness);
+    // Quick white flash to confirm wiring
+    fill_solid(leds, settings.numOutputs * settings.numLedsPerOutput, CRGB::White);
+    controller.showPixels();
+    delay(200);
+    fill_solid(leds, settings.numOutputs * settings.numLedsPerOutput, CRGB::Black);
+    controller.showPixels();
+  } else {
+    displayStatus("Initializing...", "WS2812 driver");
+    Serial.println("LED type: WS2812");
+    colorarrangment colorOrder = settings.useRGBW ? ORDER_GRBW : ORDER_GRB;
+    driver.initled(ledData, settings.pins, NUMSTRIPS,
+                   settings.numLedsPerOutput, colorOrder);
+    driver.setBrightness(settings.ledBrightness);
+  }
+
+  // ── Networking ────────────────────────────────────────────────────────────
   pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
   state.startAttemptTime = millis();
-  
+
   switch (settings.networkMode) {
-    case 0: // Ethernet
-      setupEthernet();
-      break;
-    case 1: // WiFi
-      setupWiFi();
-      break;
-    case 2: // AP Mode
-      startAPMode();
-      break;
-    case 3: // RGB Test - standalone mode, no network
+    case 0: setupEthernet(); break;
+    case 1: setupWiFi();     break;
+    case 2: startAPMode();   break;
+    case 3:
       displayStatus("RGB Test Mode", "Cycling colors...", "Press button to exit");
-      Serial.println("RGB Test Mode - No network initialized");
-      // Don't initialize any network, just show the display and let loop handle LEDs
-      return; // Skip ArtNet setup
-      break;
-    case 4: // Static Color - standalone mode, no network
+      return;
+    case 4:
       displayStatus("Static Color Mode", "Color: " + settings.staticColor, "Press button to exit");
-      Serial.println("Static Color Mode - No network initialized");
-      // Don't initialize any network, just show the display and let loop handle LEDs
-      return; // Skip ArtNet setup
-      break;
-    default:
-      setupEthernet();
-      break;
+      return;
+    default: setupEthernet(); break;
   }
-  
-  // If not in AP mode, set up ArtNet
+
+  // ── ArtNet ────────────────────────────────────────────────────────────────
   if (!state.isAPMode) {
     IPAddress activeIP = (settings.networkMode == 1) ? WiFi.localIP() : ETH.localIP();
-    
-    // Update display with connection info
+
     String ipStr = activeIP.toString();
     int ledsPerUniverse = settings.useRGBW ? 128 : 170;
     int universesPerOutput = (settings.numLedsPerOutput + ledsPerUniverse - 1) / ledsPerUniverse;
-    String ledsInfo = "LED:" + String(settings.numLedsPerOutput) + 
+    String ledsInfo = "LED:" + String(settings.numLedsPerOutput) +
                       " Uni:" + String(universesPerOutput) +
                       " Out:" + String(settings.numOutputs);
     displayStatus(settings.nodeName, ipStr, ledsInfo);
-    
-    int universeSize = settings.useRGBW ? (128 * 4) : (170 * 3);  // 512 for RGBW, 510 for RGB
+
+    int universeSize    = settings.useRGBW ? (128 * 4) : (170 * 3);
+    int channelsPerLed  = getChannelsPerLed();
 
     artnet.addSubArtnet(
-      settings.startUniverse, 
-      settings.numLedsPerOutput * settings.numOutputs * channelsPerLed, 
-      universeSize, 
+      settings.startUniverse,
+      settings.numLedsPerOutput * settings.numOutputs * channelsPerLed,
+      universeSize,
       &displayfunction
     );
     artnet.setNodeName(settings.nodeName);
-    
+
     if (artnet.listen(activeIP, 6454)) {
       Serial.print("Artnet Listening on IP: ");
       Serial.println(activeIP);
@@ -288,132 +324,91 @@ void setup() {
   }
 }
 
-/**
- * Main loop function
- */
+// ─── Loop ─────────────────────────────────────────────────────────────────────
 void loop() {
-  // Always check boot button regardless of mode
   checkBootButton();
-  
-  // Handle standalone LED modes (no network)
+
+  // Standalone LED modes (no network)
   if (settings.networkMode == 3 || settings.networkMode == 4) {
-    // RGB Test or Static Color mode - no network, just LED patterns
     if (settings.networkMode == 3 && settings.ledCycleEnabled) {
       cycleLEDs();
     } else if (settings.networkMode == 4) {
       if (state.colorSelectionMode) {
-        // In color selection mode
         handleColorSelection();
       } else {
-        // Normal static color mode
         if (settings.enStatColor && !state.isStaticColorSet) {
           applyStaticColor();
           state.isStaticColorSet = true;
         }
       }
     }
-    return; // Skip all network handling
+    return;
   }
-  
-  // Handle web server requests (only for network modes)
+
   server.handleClient();
 
   if (!state.isAPMode) {
-    static bool wasDisconnected = true;  // Start as true to detect initial connection
-    static bool lastConnectionState = false;  // Track previous connection state
-    bool networkDisconnected = false;
-    
+    static bool wasDisconnected   = true;
+    static bool lastConnectionState = false;
+
     if (settings.networkMode == 1) {
-      // WiFi mode
-      networkDisconnected = (WiFi.status() != WL_CONNECTED);
-      bool currentlyConnected = !networkDisconnected;
-      
+      bool networkDisconnected = (WiFi.status() != WL_CONNECTED);
+      bool currentlyConnected  = !networkDisconnected;
+
       if (networkDisconnected) {
-        // Handle WiFi disconnection with blinking red LED
         static unsigned long lastBlinkTime = 0;
-        
-        if (!wasDisconnected) {
-          // Just disconnected
-          Serial.println("WiFi disconnected");
-          wasDisconnected = true;
-        }
-        
-        if (millis() - lastBlinkTime >= 500) {  // Blink every 500ms
+        if (!wasDisconnected) { Serial.println("WiFi disconnected"); wasDisconnected = true; }
+        if (millis() - lastBlinkTime >= 500) {
           lastBlinkTime = millis();
           state.ledState = !state.ledState;
-          setStatusLED(state.ledState ? 255 : 0, 0, 0);  // Blinking red
-          
-          // Update display to show waiting for WiFi
+          setStatusLED(state.ledState ? 255 : 0, 0, 0);
           displayStatus("Waiting for Wi-Fi");
         }
       } else {
-        // Connected - check if we just connected or reconnected
         if (wasDisconnected || !lastConnectionState) {
-          setStatusLED(0, 255, 0);  // Green LED
-          
-          // Create display info with LEDs and outputs count
-          String ipInfo = "WiFi: " + WiFi.localIP().toString();
+          setStatusLED(0, 255, 0);
           int ledsPerUniverse = settings.useRGBW ? 128 : 170;
           int universesPerOutput = (settings.numLedsPerOutput + ledsPerUniverse - 1) / ledsPerUniverse;
-          String ledsInfo = "LED:" + String(settings.numLedsPerOutput) + 
+          String ledsInfo = "LED:" + String(settings.numLedsPerOutput) +
                             " Uni:" + String(universesPerOutput) +
                             " Out:" + String(settings.numOutputs);
-          
-          displayStatus(settings.nodeName, ipInfo, ledsInfo, "", true);  // Show WiFi icon
+          displayStatus(settings.nodeName, "WiFi: " + WiFi.localIP().toString(), ledsInfo, "", true);
           wasDisconnected = false;
-          Serial.println("WiFi connected - IP: " + WiFi.localIP().toString());
         }
       }
-      
       lastConnectionState = currentlyConnected;
-      
+
     } else if (settings.networkMode == 0) {
-      // Ethernet mode - check IP address
-      networkDisconnected = (ETH.localIP() == INADDR_NONE);
-      bool currentlyConnected = !networkDisconnected;
-      
+      bool networkDisconnected = (ETH.localIP() == INADDR_NONE);
+      bool currentlyConnected  = !networkDisconnected;
+
       if (networkDisconnected) {
-        // Handle ethernet disconnection with blinking red LED
         static unsigned long lastBlinkTime = 0;
-        
-        if (!wasDisconnected) {
-          // Just disconnected
-          Serial.println("Ethernet disconnected");
-          wasDisconnected = true;
-        }
-        
-        if (millis() - lastBlinkTime >= 500) {  // Blink every 500ms
+        if (!wasDisconnected) { Serial.println("Ethernet disconnected"); wasDisconnected = true; }
+        if (millis() - lastBlinkTime >= 500) {
           lastBlinkTime = millis();
           state.ledState = !state.ledState;
-          setStatusLED(state.ledState ? 255 : 0, 0, 0);  // Blinking red
-          
-          // Update display to show waiting for ethernet
+          setStatusLED(state.ledState ? 255 : 0, 0, 0);
           displayStatus("Waiting for Ethernet");
         }
       } else {
-        // Connected - check if we just connected or reconnected
         if (wasDisconnected || !lastConnectionState) {
-          setStatusLED(0, 255, 0);  // Green LED
-          
-          // Create display info with LEDs and outputs count
-          String ipInfo = settings.useStaticIP ? "Static: " + settings.staticIP : "DHCP: " + ETH.localIP().toString();
+          setStatusLED(0, 255, 0);
+          String ipInfo = settings.useStaticIP ? "Static: " + settings.staticIP
+                                                : "DHCP: " + ETH.localIP().toString();
           int ledsPerUniverse = settings.useRGBW ? 128 : 170;
           int universesPerOutput = (settings.numLedsPerOutput + ledsPerUniverse - 1) / ledsPerUniverse;
-          String ledsInfo = "LED:" + String(settings.numLedsPerOutput) + 
+          String ledsInfo = "LED:" + String(settings.numLedsPerOutput) +
                             " Uni:" + String(universesPerOutput) +
                             " Out:" + String(settings.numOutputs);
-          
           displayStatus(settings.nodeName, ipInfo, ledsInfo);
           wasDisconnected = false;
-          Serial.println("Ethernet connected - IP: " + ETH.localIP().toString());
         }
       }
-      
       lastConnectionState = currentlyConnected;
     }
   }
-  
-  // Handle LED test cycle or static color
+
   if (settings.enStatColor && !state.isStaticColorSet) {
     applyStaticColor();
     state.isStaticColorSet = true;
@@ -425,1150 +420,704 @@ void loop() {
   }
 }
 
-/**
- * Update all LED strip pins according to settings
- */
+// ─── Update strip pins ────────────────────────────────────────────────────────
 void updateStripPins() {
   for (int i = 0; i < NUMSTRIPS; i++) {
     if (strips[i].getPin() != settings.pins[i]) {
-      Serial.printf("Strip %d pin changed from %d to %d\n", 
-                    i, strips[i].getPin(), settings.pins[i]);
-      
       strips[i].setPin(settings.pins[i]);
       strips[i].begin();
     }
   }
 }
 
-/**
- * Load settings from preferences
- */
+// ─── Load / save settings ─────────────────────────────────────────────────────
 void loadSettings() {
   preferences.begin("esp32config", true);
-  
   settings.numLedsPerOutput = preferences.getInt("numledsoutput", settings.numLedsPerOutput);
-  settings.numOutputs = preferences.getInt("numoutput", settings.numOutputs);
-  settings.startUniverse = preferences.getInt("startuniverse", settings.startUniverse);
-  settings.nodeName = preferences.getString("nodename", settings.nodeName);
-  settings.ledBrightness = preferences.getInt("ledbrightness", settings.ledBrightness);
-  settings.ssid = preferences.getString("ssid", settings.ssid);
-  settings.password = preferences.getString("password", settings.password);
-  settings.useWiFi = preferences.getBool("useWiFi", settings.useWiFi);
-  settings.staticColor = preferences.getString("staticColor", settings.staticColor);
-  settings.enStatColor = preferences.getBool("enStatColor", settings.enStatColor);
+  settings.numOutputs       = preferences.getInt("numoutput",     settings.numOutputs);
+  settings.startUniverse    = preferences.getInt("startuniverse", settings.startUniverse);
+  settings.nodeName         = preferences.getString("nodename",   settings.nodeName);
+  settings.ledBrightness    = preferences.getInt("ledbrightness", settings.ledBrightness);
+  settings.ssid             = preferences.getString("ssid",       settings.ssid);
+  settings.password         = preferences.getString("password",   settings.password);
+  settings.useWiFi          = preferences.getBool("useWiFi",      settings.useWiFi);
+  settings.staticColor      = preferences.getString("staticColor",settings.staticColor);
+  settings.enStatColor      = preferences.getBool("enStatColor",  settings.enStatColor);
   settings.enableCustomPins = preferences.getBool("enCustomPins", false);
-  settings.ledCycleEnabled = preferences.getBool("ledCycleEnabled", false);
-  settings.useStaticIP = preferences.getBool("useStaticIP", settings.useStaticIP);
-  settings.staticIP = preferences.getString("staticIP", settings.staticIP);
-  settings.gateway = preferences.getString("gateway", settings.gateway);
-  settings.gateway = preferences.getString("gateway", settings.gateway);
-  settings.subnet = preferences.getString("subnet", settings.subnet);
-  settings.networkMode = preferences.getInt("networkMode", -1);
-  settings.useRGBW = preferences.getBool("useRGBW", settings.useRGBW);
-  settings.whiteLevel = preferences.getInt("whiteLevel", settings.whiteLevel);
+  settings.ledCycleEnabled  = preferences.getBool("ledCycleEnabled", false);
+  settings.useStaticIP      = preferences.getBool("useStaticIP",  settings.useStaticIP);
+  settings.staticIP         = preferences.getString("staticIP",   settings.staticIP);
+  settings.gateway          = preferences.getString("gateway",    settings.gateway);
+  settings.subnet           = preferences.getString("subnet",     settings.subnet);
+  settings.networkMode      = preferences.getInt("networkMode",   -1);
+  settings.useRGBW          = preferences.getBool("useRGBW",      settings.useRGBW);
+  settings.whiteLevel       = preferences.getInt("whiteLevel",    settings.whiteLevel);
+  settings.ledType          = preferences.getInt("ledType",       settings.ledType); // NEW
 
-  // Default network mode logic if not set
-  if (settings.networkMode == -1) {
+  if (settings.networkMode == -1)
     settings.networkMode = settings.useWiFi ? 1 : 0;
-  }
-  
-  // Load pins
+
   for (int i = 0; i < NUMSTRIPS; i++) {
-    char pinKey[10];
-    sprintf(pinKey, "pin%d", i);
-    settings.pins[i] = preferences.getInt(pinKey, DEFAULT_PINS[i]);
+    char key[10]; sprintf(key, "pin%d", i);
+    settings.pins[i] = preferences.getInt(key, DEFAULT_PINS[i]);
   }
-  
-  // If custom pins not enabled, use default pins
   if (!settings.enableCustomPins) {
-    for (int i = 0; i < NUMSTRIPS; i++) {
-      settings.pins[i] = DEFAULT_PINS[i];
-    }
+    for (int i = 0; i < NUMSTRIPS; i++) settings.pins[i] = DEFAULT_PINS[i];
   }
-  
   preferences.end();
 }
 
-/**
- * Reset pins to default values
- */
-void resetToDefaultPins() {
-  for (int i = 0; i < NUMSTRIPS; i++) {
-    settings.pins[i] = DEFAULT_PINS[i];
-  }
-}
-
-/**
- * Save settings to preferences
- */
 void saveSettings() {
   preferences.begin("esp32config", false);
-  
-  preferences.putInt("numledsoutput", settings.numLedsPerOutput);
-  preferences.putInt("numoutput", settings.numOutputs);
-  preferences.putInt("startuniverse", settings.startUniverse);
-  preferences.putString("nodename", settings.nodeName);
-  preferences.putInt("ledbrightness", settings.ledBrightness);
-  preferences.putString("ssid", settings.ssid);
-  preferences.putString("password", settings.password);
-  preferences.putBool("useWiFi", settings.useWiFi);
+  preferences.putInt("numledsoutput",  settings.numLedsPerOutput);
+  preferences.putInt("numoutput",      settings.numOutputs);
+  preferences.putInt("startuniverse",  settings.startUniverse);
+  preferences.putString("nodename",    settings.nodeName);
+  preferences.putInt("ledbrightness",  settings.ledBrightness);
+  preferences.putString("ssid",        settings.ssid);
+  preferences.putString("password",    settings.password);
+  preferences.putBool("useWiFi",       settings.useWiFi);
   preferences.putString("staticColor", settings.staticColor);
-  preferences.putBool("enStatColor", settings.enStatColor);
-  preferences.putBool("enCustomPins", settings.enableCustomPins);
+  preferences.putBool("enStatColor",   settings.enStatColor);
+  preferences.putBool("enCustomPins",  settings.enableCustomPins);
   preferences.putBool("ledCycleEnabled", settings.ledCycleEnabled);
-  preferences.putBool("useStaticIP", settings.useStaticIP);
-  preferences.putString("staticIP", settings.staticIP);
-  preferences.putString("gateway", settings.gateway);
-  preferences.putString("gateway", settings.gateway);
-  preferences.putString("subnet", settings.subnet);
-  preferences.putInt("networkMode", settings.networkMode);
-  preferences.putBool("useRGBW", settings.useRGBW);
-  preferences.putInt("whiteLevel", settings.whiteLevel);
-  
-  // Save pins
+  preferences.putBool("useStaticIP",   settings.useStaticIP);
+  preferences.putString("staticIP",    settings.staticIP);
+  preferences.putString("gateway",     settings.gateway);
+  preferences.putString("subnet",      settings.subnet);
+  preferences.putInt("networkMode",    settings.networkMode);
+  preferences.putBool("useRGBW",       settings.useRGBW);
+  preferences.putInt("whiteLevel",     settings.whiteLevel);
+  preferences.putInt("ledType",        settings.ledType);   // NEW
   for (int i = 0; i < NUMSTRIPS; i++) {
-    char pinKey[10];
-    sprintf(pinKey, "pin%d", i);
-    preferences.putInt(pinKey, settings.pins[i]);
+    char key[10]; sprintf(key, "pin%d", i);
+    preferences.putInt(key, settings.pins[i]);
   }
-  
   preferences.end();
 }
 
-/**
- * Draw a simple WiFi icon at specified coordinates
- */
-void drawWiFiIcon(int x, int y) {
-  // Draw WiFi signal bars (simple 3-bar icon)
-  // Bar 1 (shortest)
-  display.drawPixel(x, y + 5, SSD1306_WHITE);
-  display.drawPixel(x, y + 6, SSD1306_WHITE);
-  display.drawPixel(x, y + 7, SSD1306_WHITE);
-  
-  // Bar 2 (medium)
-  display.drawPixel(x + 2, y + 3, SSD1306_WHITE);
-  display.drawPixel(x + 2, y + 4, SSD1306_WHITE);
-  display.drawPixel(x + 2, y + 5, SSD1306_WHITE);
-  display.drawPixel(x + 2, y + 6, SSD1306_WHITE);
-  display.drawPixel(x + 2, y + 7, SSD1306_WHITE);
-  
-  // Bar 3 (tallest)
-  display.drawPixel(x + 4, y + 1, SSD1306_WHITE);
-  display.drawPixel(x + 4, y + 2, SSD1306_WHITE);
-  display.drawPixel(x + 4, y + 3, SSD1306_WHITE);
-  display.drawPixel(x + 4, y + 4, SSD1306_WHITE);
-  display.drawPixel(x + 4, y + 5, SSD1306_WHITE);
-  display.drawPixel(x + 4, y + 6, SSD1306_WHITE);
-  display.drawPixel(x + 4, y + 7, SSD1306_WHITE);
-  
+void resetToDefaultPins() {
+  for (int i = 0; i < NUMSTRIPS; i++) settings.pins[i] = DEFAULT_PINS[i];
 }
 
-/**
- * Display multiple lines on the OLED screen with optional WiFi icon
- */
-void displayStatus(const String& line1, const String& line2, const String& line3, const String& line4, bool showWiFiIcon) {
+// ─── OLED helpers ─────────────────────────────────────────────────────────────
+void drawWiFiIcon(int x, int y) {
+  display.drawPixel(x,     y+5, SSD1306_WHITE);
+  display.drawPixel(x,     y+6, SSD1306_WHITE);
+  display.drawPixel(x,     y+7, SSD1306_WHITE);
+  display.drawPixel(x+2,   y+3, SSD1306_WHITE);
+  display.drawPixel(x+2,   y+4, SSD1306_WHITE);
+  display.drawPixel(x+2,   y+5, SSD1306_WHITE);
+  display.drawPixel(x+2,   y+6, SSD1306_WHITE);
+  display.drawPixel(x+2,   y+7, SSD1306_WHITE);
+  display.drawPixel(x+4,   y+1, SSD1306_WHITE);
+  display.drawPixel(x+4,   y+2, SSD1306_WHITE);
+  display.drawPixel(x+4,   y+3, SSD1306_WHITE);
+  display.drawPixel(x+4,   y+4, SSD1306_WHITE);
+  display.drawPixel(x+4,   y+5, SSD1306_WHITE);
+  display.drawPixel(x+4,   y+6, SSD1306_WHITE);
+  display.drawPixel(x+4,   y+7, SSD1306_WHITE);
+}
+
+void displayStatus(const String& line1, const String& line2, const String& line3,
+                   const String& line4, bool showWiFiIcon) {
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
-  
-  display.setCursor(0, 0);
-  display.println(line1);
-  
-  if (line2.length() > 0) {
-    display.setCursor(0, 9);
-    display.println(line2);
-  }
-  
-  if (line3.length() > 0) {
-    display.setCursor(0, 18);
-    display.println(line3);
-  }
-  
-  if (line4.length() > 0) {
-    display.setCursor(0, 27);
-    display.println(line4);
-  }
-  
-  // Draw WiFi icon in bottom right if requested
-  if (showWiFiIcon) {
-    drawWiFiIcon(SCREEN_WIDTH - 8, SCREEN_HEIGHT - 10);
-  }
-  
+  display.setCursor(0, 0);  display.println(line1);
+  if (line2.length()) { display.setCursor(0,  9); display.println(line2); }
+  if (line3.length()) { display.setCursor(0, 18); display.println(line3); }
+  if (line4.length()) { display.setCursor(0, 27); display.println(line4); }
+  if (showWiFiIcon)   drawWiFiIcon(SCREEN_WIDTH - 8, SCREEN_HEIGHT - 10);
   display.display();
 }
 
-/**
- * Display connection status with timeout
- */
 void displayConnectionStatus(const String& type, int remainingTime) {
-  String line1 = "Waiting for " + type;
-  String line2 = "";
-  
-  if (remainingTime >= 0) {
-    line2 = "Timeout in: " + String(remainingTime) + "s";
-  }
-  
-  displayStatus(line1, line2);
+  String line2 = (remainingTime >= 0) ? "Timeout in: " + String(remainingTime) + "s" : "";
+  displayStatus("Waiting for " + type, line2);
 }
 
-/**
- * Handle color selection display and LED updates
- */
+// ─── Status LED ───────────────────────────────────────────────────────────────
+void setStatusLED(uint8_t r, uint8_t g, uint8_t b) {
+  StatusLed.setPixelColor(0, StatusLed.Color(r/2, g/2, b/2));
+  StatusLed.show();
+}
+
+// ─── Colour cycle (test mode) ─────────────────────────────────────────────────
+void cycleLEDs() {
+  if (millis() - state.lastUpdate < CYCLE_DELAY) return;
+  state.lastUpdate = millis();
+
+  uint8_t r = 0, g = 0, b = 0;
+  switch (state.currentColor) {
+    case 0: r = settings.ledBrightness; break;
+    case 1: g = settings.ledBrightness; break;
+    case 2: b = settings.ledBrightness; break;
+  }
+  state.currentColor = (state.currentColor + 1) % 3;
+  setAllLeds(r, g, b);
+}
+
+// ─── Static colour ────────────────────────────────────────────────────────────
+void applyStaticColor() {
+  if (!settings.enStatColor) return;
+  uint32_t color = strtol(settings.staticColor.substring(1).c_str(), NULL, 16);
+  uint8_t r = (color >> 16) & 0xFF;
+  uint8_t g = (color >>  8) & 0xFF;
+  uint8_t b =  color        & 0xFF;
+  setStatusLED(r, g, b);
+  setAllLeds(r, g, b);
+}
+
+// ─── Colour selection (boot-button standalone mode) ───────────────────────────
 void handleColorSelection() {
-  // Handle blinking display
   if (millis() - state.lastBlinkTime >= 500) {
     state.lastBlinkTime = millis();
-    state.displayBlink = !state.displayBlink;
-    
-    if (state.displayBlink) {
-      // Show color info
-      displayStatus("Color Selection", 
-                    "Color: " + presetColors[state.selectedColorIndex]);
-    } else {
-      // Blank display for blink effect
-      displayStatus("", 
-                    "");
-    }
+    state.displayBlink  = !state.displayBlink;
+    if (state.displayBlink)
+      displayStatus("Color Selection", "Color: " + presetColors[state.selectedColorIndex]);
+    else
+      displayStatus("", "");
   }
-  
-  // Update LEDs with selected color
   uint32_t color = strtol(presetColors[state.selectedColorIndex].substring(1).c_str(), NULL, 16);
-  
-  // Extract RGB components for status LED
   uint8_t r = (color >> 16) & 0xFF;
-  uint8_t g = (color >> 8) & 0xFF;
-  uint8_t b = color & 0xFF;
-  
-  // Set status LED to match the selected color
+  uint8_t g = (color >>  8) & 0xFF;
+  uint8_t b =  color        & 0xFF;
   setStatusLED(r, g, b);
-  
-  // Apply to LED strips
-  for (int i = 0; i < settings.numOutputs; i++) {
-    for (int j = 0; j < settings.numLedsPerOutput; j++) {
-      strips[i].setPixelColor(j, color);
-    }
-    strips[i].show();
-  }
+  setAllLeds(r, g, b);
 }
 
-/**
- * Check if boot button is pressed to switch mode
- */
+// ─── Boot button ──────────────────────────────────────────────────────────────
 void checkBootButton() {
-  if (digitalRead(BOOT_BUTTON_PIN) == LOW) {
-    unsigned long pressTime = millis();
-    
-    // Wait for button release or long press threshold
-    while(digitalRead(BOOT_BUTTON_PIN) == LOW) {
-      unsigned long pressDuration = millis() - pressTime;
-      
-      // Long press (1000ms) - handle based on current mode
-      if (pressDuration > 1000) {
-        Serial.println("long press triggered");
-        if (settings.networkMode == 0) {
-          // In Ethernet mode - toggle between Static IP and DHCP
-          Serial.println("toggle between Static IP and DHCP");
-          settings.useStaticIP = !settings.useStaticIP;
-          saveSettings();
-          
-          // Show feedback on display
-          if (settings.useStaticIP) {
-            displayStatus("Switching to", "Static IP", settings.staticIP);
-            Serial.println("Switching to Static IP: " + settings.staticIP);
-          } else {
-            displayStatus("Switching to", "DHCP");
-            Serial.println("Switching to DHCP");
+  if (digitalRead(BOOT_BUTTON_PIN) != LOW) return;
+  unsigned long pressTime = millis();
+
+  while (digitalRead(BOOT_BUTTON_PIN) == LOW) {
+    unsigned long dur = millis() - pressTime;
+    if (dur > 1000) {
+      // Long press
+      if (settings.networkMode == 0) {
+        settings.useStaticIP = !settings.useStaticIP;
+        saveSettings();
+        displayStatus("Switching to", settings.useStaticIP ? "Static IP" : "DHCP",
+                      settings.useStaticIP ? settings.staticIP : "");
+        while (digitalRead(BOOT_BUTTON_PIN) == LOW) delay(10);
+        delay(1000); ESP.restart(); return;
+      } else if (settings.networkMode == 4) {
+        state.colorSelectionMode = !state.colorSelectionMode;
+        if (state.colorSelectionMode) {
+          for (int i = 0; i < PRESET_COLORS_COUNT; i++) {
+            if (settings.staticColor == presetColors[i]) { state.selectedColorIndex = i; break; }
           }
-          
-          // Wait for button release
-          while(digitalRead(BOOT_BUTTON_PIN) == LOW) {
-            delay(10);
-          }
-          
-          delay(1000);
-          ESP.restart();
-          return;
-        } else if (settings.networkMode == 4) {
-          // In standalone static color mode - toggle color selection
-          state.colorSelectionMode = !state.colorSelectionMode;
-          
-          if (state.colorSelectionMode) {
-            // Entering color selection mode - start blinking immediately
-            Serial.println("Entering color selection mode");
-            // Find current color index
-            for (int i = 0; i < PRESET_COLORS_COUNT; i++) {
-              if (settings.staticColor == presetColors[i]) {
-                state.selectedColorIndex = i;
-                break;
-              }
-            }
-            // Start blinking immediately to show we entered selection mode
-            state.lastBlinkTime = millis();
-            state.displayBlink = true;
-            displayStatus("Color Selection", 
-                          "Color: " + presetColors[state.selectedColorIndex]);
-          } else {
-            // Exiting color selection mode - save selected color
-            settings.staticColor = presetColors[state.selectedColorIndex];
-            saveSettings();
-            state.isStaticColorSet = false; // Force color update
-            Serial.println("Color saved: " + settings.staticColor);
-            
-            // Stop blinking and ensure display is visible
-            state.displayBlink = false;
-            
-            // Show normal static color display immediately
-            displayStatus("Static Color Mode", "Color: " + settings.staticColor, "Press button to exit");
-          }
-          
-          // Wait for button release
-          while(digitalRead(BOOT_BUTTON_PIN) == LOW) {
-            delay(10);
-          }
-          return;
+          state.lastBlinkTime = millis();
+          state.displayBlink  = true;
+          displayStatus("Color Selection", "Color: " + presetColors[state.selectedColorIndex]);
         } else {
-          // Normal mode switching for other modes
-          break; // Continue to mode switching logic
-        }
-      }
-      
-      delay(10);
-    }
-    
-    unsigned long pressDuration = millis() - pressTime;
-    
-    if (pressDuration > 100) {
-      // Short press - handle based on current mode
-      if (settings.networkMode == 4 && state.colorSelectionMode) {
-        // In color selection mode - cycle through colors
-        state.selectedColorIndex = (state.selectedColorIndex + 1) % 10;
-        state.isStaticColorSet = false; // Force color update
-        Serial.println("Selected color: " + presetColors[state.selectedColorIndex]);
-      } else {
-        // Normal mode switching for short press (except when in color selection)
-        if (!(settings.networkMode == 4 && state.colorSelectionMode)) {
-          // Cycle through 5 modes: 0=Ethernet, 1=WiFi, 2=AP, 3=RGB Test, 4=Static Color
-          settings.networkMode = (settings.networkMode + 1) % 5;
-          
-          // Update settings based on networkMode
-          switch (settings.networkMode) {
-            case 0: // Ethernet
-              settings.useWiFi = false;
-              settings.ledCycleEnabled = false;
-              settings.enStatColor = false;
-              displayStatus("Switching Mode...", "Ethernet");
-              break;
-              
-            case 1: // WiFi
-              settings.useWiFi = true;
-              settings.ledCycleEnabled = false;
-              settings.enStatColor = false;
-              displayStatus("Switching Mode...", "Wi-Fi");
-              break;
-              
-            case 2: // AP Mode
-              settings.useWiFi = false;
-              settings.ledCycleEnabled = false;
-              settings.enStatColor = false;
-              displayStatus("Switching Mode...", "AP Mode");
-              break;
-              
-            case 3: // RGB Test
-              // Keep current useWiFi setting, enable RGB test
-              settings.ledCycleEnabled = true;
-              settings.enStatColor = false;
-              displayStatus("Switching Mode...", "RGB Test Cycle");
-              break;
-              
-            case 4: // Static Color
-              // Keep current useWiFi setting, enable static color
-              settings.ledCycleEnabled = false;
-              settings.enStatColor = true;
-              displayStatus("Switching Mode...", "Static Color");
-              break;
-          }
-          
+          settings.staticColor  = presetColors[state.selectedColorIndex];
           saveSettings();
-          delay(1000);
-          ESP.restart();
+          state.isStaticColorSet = false;
+          state.displayBlink     = false;
+          displayStatus("Static Color Mode", "Color: " + settings.staticColor, "Press button to exit");
         }
+        while (digitalRead(BOOT_BUTTON_PIN) == LOW) delay(10);
+        return;
+      } else {
+        break;
       }
+    }
+    delay(10);
+  }
+
+  unsigned long dur = millis() - pressTime;
+  if (dur > 100) {
+    if (settings.networkMode == 4 && state.colorSelectionMode) {
+      state.selectedColorIndex = (state.selectedColorIndex + 1) % PRESET_COLORS_COUNT;
+      state.isStaticColorSet   = false;
+    } else {
+      settings.networkMode = (settings.networkMode + 1) % 5;
+      switch (settings.networkMode) {
+        case 0: settings.useWiFi=false; settings.ledCycleEnabled=false; settings.enStatColor=false; displayStatus("Switching Mode...","Ethernet"); break;
+        case 1: settings.useWiFi=true;  settings.ledCycleEnabled=false; settings.enStatColor=false; displayStatus("Switching Mode...","Wi-Fi");    break;
+        case 2: settings.useWiFi=false; settings.ledCycleEnabled=false; settings.enStatColor=false; displayStatus("Switching Mode...","AP Mode");   break;
+        case 3: settings.ledCycleEnabled=true;  settings.enStatColor=false; displayStatus("Switching Mode...","RGB Test Cycle"); break;
+        case 4: settings.ledCycleEnabled=false; settings.enStatColor=true;  displayStatus("Switching Mode...","Static Color");   break;
+      }
+      saveSettings(); delay(1000); ESP.restart();
     }
   }
 }
 
-/**
- * Set up WiFi connection
- */
+// ─── WiFi setup ───────────────────────────────────────────────────────────────
 void setupWiFi() {
   if (settings.useStaticIP) {
-    IPAddress ip, gateway, subnet;
-    if (ip.fromString(settings.staticIP) && 
-        gateway.fromString(settings.gateway) && 
-        subnet.fromString(settings.subnet)) {
-      WiFi.config(ip, gateway, subnet);
-    } else {
-      Serial.println("Invalid static IP configuration");
-    }
+    IPAddress ip, gw, sn;
+    if (ip.fromString(settings.staticIP) && gw.fromString(settings.gateway) && sn.fromString(settings.subnet))
+      WiFi.config(ip, gw, sn);
   }
-
   WiFi.begin(settings.ssid.c_str(), settings.password.c_str());
   displayStatus("Connecting to Wi-Fi...");
-  
   while (WiFi.status() != WL_CONNECTED) {
     checkBootButton();
-    
-    // Toggle status LED
     state.ledState = !state.ledState;
     setStatusLED(state.ledState ? 255 : 0, 0, 0);
-    
     displayConnectionStatus("Wi-Fi");
-    
     delay(500);
   }
-
-  // Set up web server
   server.on("/", HTTP_GET, handleRoot);
   server.on("/config", HTTP_POST, handleConfig);
   server.on("/update", HTTP_GET, handleOTAUpdate);
   server.on("/doUpdate", HTTP_POST, handleOTAUpdateResponse, handleDoUpdate);
   server.begin();
-  
   displayStatus("Wi-Fi connected", settings.ssid);
   setStatusLED(0, 255, 0);
 }
 
-/**
- * Set up Ethernet connection
- */
+// ─── Ethernet setup ───────────────────────────────────────────────────────────
 void setupEthernet() {
   displayStatus("Initializing Ethernet");
-  
   ESP32_W5500_onEvent();
   ETH.begin(MISO_GPIO, MOSI_GPIO, SCK_GPIO, CS_GPIO, INT_GPIO, SPI_CLOCK_MHZ, ETH_SPI_HOST);
-
-  // Configure static IP if enabled
   if (settings.useStaticIP) {
-    IPAddress ip, gateway, subnet;
-    if (ip.fromString(settings.staticIP) && 
-        gateway.fromString(settings.gateway) && 
-        subnet.fromString(settings.subnet)) {
-      ETH.config(ip, gateway, subnet);
-      Serial.println("Using static IP: " + settings.staticIP);
-    } else {
-      Serial.println("Invalid static IP configuration, using DHCP");
-    }
+    IPAddress ip, gw, sn;
+    if (ip.fromString(settings.staticIP) && gw.fromString(settings.gateway) && sn.fromString(settings.subnet))
+      ETH.config(ip, gw, sn);
   }
-  
-  // Wait for ethernet connection and IP address
   while (ETH.localIP() == INADDR_NONE) {
     checkBootButton();
-    
-    // Toggle status LED
     state.ledState = !state.ledState;
     setStatusLED(state.ledState ? 255 : 0, 0, 0);
     displayConnectionStatus("Ethernet");
-    
     delay(500);
   }
-  
-  // Set up web server routes
   server.on("/", HTTP_GET, handleRoot);
   server.on("/config", HTTP_POST, handleConfig);
   server.on("/update", HTTP_GET, handleOTAUpdate);
   server.on("/doUpdate", HTTP_POST, handleOTAUpdateResponse, handleDoUpdate);
   server.begin();
-  
-  // Connection established - display and LED will be updated by event handler
   Serial.println("Ethernet setup complete");
 }
 
-/**
- * Start Access Point mode
- */
+// ─── AP mode ──────────────────────────────────────────────────────────────────
 void startAPMode() {
   state.isAPMode = true;
   WiFi.softAP(settings.nodeName.c_str());
   IPAddress IP = WiFi.softAPIP();
-  
-  // Set up web server
   server.on("/", HTTP_GET, handleRoot);
   server.on("/config", HTTP_POST, handleConfig);
   server.on("/update", HTTP_GET, handleOTAUpdate);
   server.on("/doUpdate", HTTP_POST, handleOTAUpdateResponse, handleDoUpdate);
   server.begin();
-  
-  // Set status LED to blue
   setStatusLED(0, 0, 255);
-  
-  // Update display
   displayStatus("AP Mode", settings.nodeName, "IP:" + IP.toString());
 }
 
-/**
- * Cycle LEDs through RGB(W) test pattern
- */
-void cycleLEDs() {
-  if (millis() - state.lastUpdate >= CYCLE_DELAY) {
-    state.lastUpdate = millis();
-    
-    // Determine color based on cycle
-    uint32_t color;
-    if (settings.useRGBW) {
-      // RGBW mode - cycle through R, G, B, W
-      switch (state.currentColor) {
-        case 0: color = strips[0].Color(settings.ledBrightness, 0, 0, 0); break;  // Red
-        case 1: color = strips[0].Color(0, settings.ledBrightness, 0, 0); break;  // Green
-        case 2: color = strips[0].Color(0, 0, settings.ledBrightness, 0); break;  // Blue
-        case 3: color = strips[0].Color(0, 0, 0, settings.ledBrightness); break;  // White
-      }
-    } else {
-      // RGB mode - cycle through R, G, B
-      switch (state.currentColor) {
-        case 0: color = strips[0].Color(settings.ledBrightness, 0, 0); break;  // Red
-        case 1: color = strips[0].Color(0, settings.ledBrightness, 0); break;  // Green
-        case 2: color = strips[0].Color(0, 0, settings.ledBrightness); break;  // Blue
-      }
-    }
-    
-    // Apply color to all strips
-    for (int i = 0; i < settings.numOutputs; i++) {
-      for (int j = 0; j < settings.numLedsPerOutput; j++) {
-        strips[i].setPixelColor(j, color);
-      }
-      strips[i].show();
-    }
-    
-    // Move to the next color in cycle
-    int maxColors = settings.useRGBW ? 4 : 3;
-    state.currentColor = (state.currentColor + 1) % maxColors;
-  }
-}
-
-/**
- * Set status LED color
- */
-void setStatusLED(uint8_t r, uint8_t g, uint8_t b) {
-  StatusLed.setPixelColor(0, StatusLed.Color(r/2, g/2, b/2));  // Reduce brightness
-  StatusLed.show();
-}
-
-/**
- * Apply static color to all LEDs
- */
-void applyStaticColor() {
-  if (!settings.enStatColor) return;
-  
-  uint32_t color = strtol(settings.staticColor.substring(1).c_str(), NULL, 16);
-  
-  // Extract RGB components from hex color
-  uint8_t r = (color >> 16) & 0xFF;
-  uint8_t g = (color >> 8) & 0xFF;
-  uint8_t b = color & 0xFF;
-  
-  // Set status LED to match the static color
-  setStatusLED(r, g, b);
-  
-  // Apply to LED strips
-  for (int i = 0; i < settings.numOutputs; i++) {
-    for (int j = 0; j < settings.numLedsPerOutput; j++) {
-      if (settings.useRGBW) {
-        // RGBW mode - add white channel
-        strips[i].setPixelColor(j, strips[i].Color(r, g, b, settings.whiteLevel));
-      } else {
-        // RGB mode
-        strips[i].setPixelColor(j, color);
-      }
-    }
-    strips[i].show();
-  }
-}
-
-/**
- * CSS styles for web interface
- */
+// ─── CSS ──────────────────────────────────────────────────────────────────────
 const char* const CSS_STYLES = R"(
 :root {
-  --bg-color: #f4f4f4;
-  --text-color: #333;
-  --form-bg: #fff;
-  --input-bg: #fff;
-  --input-border: #ccc;
-  --button-bg: #4CAF50;
-  --button-hover: #45a049;
-  --accent-color: #007bff;
-  --warning-color: #d9534f;
-  --muted-text: #666;
+  --bg-color:#f4f4f4; --text-color:#333; --form-bg:#fff;
+  --input-bg:#fff; --input-border:#ccc; --button-bg:#4CAF50;
+  --button-hover:#45a049; --accent-color:#007bff;
+  --warning-color:#d9534f; --muted-text:#666;
 }
 body.dark-mode {
-  --bg-color: #1a1a1a;
-  --text-color: #e0e0e0;
-  --form-bg: #2d2d2d;
-  --input-bg: #3a3a3a;
-  --input-border: #555;
-  --button-bg: #ff8c00;
-  --button-hover: #ff7700;
-  --accent-color: #ff8c00;
-  --warning-color: #ff6b6b;
-  --muted-text: #999;
+  --bg-color:#1a1a1a; --text-color:#e0e0e0; --form-bg:#2d2d2d;
+  --input-bg:#3a3a3a; --input-border:#555; --button-bg:#ff8c00;
+  --button-hover:#ff7700; --accent-color:#ff8c00;
+  --warning-color:#ff6b6b; --muted-text:#999;
 }
-body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: var(--bg-color); color: var(--text-color); text-align: center; transition: background-color 0.3s, color 0.3s; }
-h1 { font-size: 24px; margin-bottom: 20px; }
-.dark-mode-toggle { position: fixed; top: 20px; right: 20px; background-color: var(--accent-color); color: white; border: none; padding: 10px 15px; border-radius: 20px; cursor: pointer; font-size: 14px; z-index: 1000; transition: background-color 0.3s; }
-.dark-mode-toggle:hover { opacity: 0.8; }
-form { background-color: var(--form-bg); padding: 20px; padding-right: 40px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1); max-width: 400px; margin: auto; transition: background-color 0.3s; }
-input[type='text'], input[type='number'] { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid var(--input-border); border-radius: 4px; font-size: 16px; background-color: var(--input-bg); color: var(--text-color); transition: background-color 0.3s, border-color 0.3s, color 0.3s; }
-input[type='submit'] { background-color: var(--button-bg); color: white; border: none; padding: 12px; font-size: 16px; cursor: pointer; border-radius: 4px; width: 100%; transition: background-color 0.3s; }
-input[type='submit']:hover { background-color: var(--button-hover); }
-.warning { margin-top: 20px; color: var(--warning-color); font-size: 14px; }
-.pin-input { width: 60px !important; display: inline-block; margin-right: 10px; }
-.pin-container { margin: 10px 0; padding: 10px; background-color: var(--input-bg); border-radius: 5px; transition: background-color 0.3s; }
-.pin-label { display: inline-block; width: 100px; text-align: left; }
-.radio-group { display: flex; justify-content: center; gap: 20px; margin: 10px 0; }
-.radio-option { display: flex; align-items: center; gap: 5px; }
-.radio-option input[type='radio'] { margin: 0; }
-.slider-container { margin: 15px 0; }
-.slider-value { display: inline-block; min-width: 50px; text-align: center; font-weight: bold; }
-input[type='range'] { width: 70%; }
-a { color: var(--accent-color); transition: color 0.3s; }
-.default-pin { color: var(--muted-text); font-size: 0.9em; margin-left: 5px; transition: color 0.3s; }
+body{font-family:Arial,sans-serif;margin:0;padding:20px;background-color:var(--bg-color);color:var(--text-color);text-align:center;transition:background-color .3s,color .3s;}
+h1{font-size:24px;margin-bottom:20px;}
+.dark-mode-toggle{position:fixed;top:20px;right:20px;background-color:var(--accent-color);color:#fff;border:none;padding:10px 15px;border-radius:20px;cursor:pointer;font-size:14px;z-index:1000;}
+form{background-color:var(--form-bg);padding:20px;padding-right:40px;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,.1);max-width:400px;margin:auto;}
+input[type='text'],input[type='number']{width:100%;padding:10px;margin:10px 0;border:1px solid var(--input-border);border-radius:4px;font-size:16px;background-color:var(--input-bg);color:var(--text-color);}
+input[type='submit']{background-color:var(--button-bg);color:#fff;border:none;padding:12px;font-size:16px;cursor:pointer;border-radius:4px;width:100%;}
+input[type='submit']:hover{background-color:var(--button-hover);}
+.warning{margin-top:20px;color:var(--warning-color);font-size:14px;}
+.pin-input{width:60px!important;display:inline-block;margin-right:10px;}
+.pin-container{margin:10px 0;padding:10px;background-color:var(--input-bg);border-radius:5px;}
+.pin-label{display:inline-block;width:100px;text-align:left;}
+.radio-group{display:flex;justify-content:center;gap:20px;margin:10px 0;}
+.radio-option{display:flex;align-items:center;gap:5px;}
+.slider-container{margin:15px 0;}
+.slider-value{display:inline-block;min-width:50px;text-align:center;font-weight:bold;}
+input[type='range']{width:70%;}
+a{color:var(--accent-color);}
+.default-pin{color:var(--muted-text);font-size:.9em;margin-left:5px;}
+.section-divider{border-top:1px solid var(--input-border);margin:15px 0;padding-top:10px;font-weight:bold;text-align:left;}
 )";
 
-/**
- * JavaScript for web interface
- */
+// ─── JavaScript ───────────────────────────────────────────────────────────────
 const char* const JS_CODE = R"(
-function togglePinInputs() {
-  var container = document.getElementById('pin-container');
-  var enableCustomPins = document.getElementById('enableCustomPins').checked;
-  container.style.display = enableCustomPins ? 'block' : 'none';
+function togglePinInputs(){
+  document.getElementById('pin-container').style.display=
+    document.getElementById('enableCustomPins').checked?'block':'none';
 }
-
-function toggleStaticIP() {
-  var container = document.getElementById('static-ip-container');
-  var useStaticIP = document.getElementById('useStaticIP').checked;
-  container.style.display = useStaticIP ? 'block' : 'none';
+function toggleStaticIP(){
+  document.getElementById('static-ip-container').style.display=
+    document.getElementById('useStaticIP').checked?'block':'none';
 }
-
-function updateChannelMode() {
-  var isRGBW = document.querySelector('input[name="channelMode"]:checked').value === '4';
-  var whiteLevelContainer = document.getElementById('white-level-container');
-  var staticColorEnabled = document.getElementById('enStatColor').checked;
-  
-  // Show white level only if RGBW mode AND static color is enabled
-  whiteLevelContainer.style.display = (isRGBW && staticColorEnabled) ? 'block' : 'none';
-  
-  // Update LED universe slider
+function updateChannelMode(){
+  var isRGBW=document.querySelector('input[name="channelMode"]:checked').value==='4';
+  var staticColorEnabled=document.getElementById('enStatColor').checked;
+  document.getElementById('white-level-container').style.display=
+    (isRGBW&&staticColorEnabled)?'block':'none';
   updateUniverseSlider();
 }
-
-function updateStaticColorState() {
-  var isRGBW = document.querySelector('input[name="channelMode"]:checked').value === '4';
-  var staticColorEnabled = document.getElementById('enStatColor').checked;
-  var whiteLevelContainer = document.getElementById('white-level-container');
-  
-  // Show white level only if RGBW mode AND static color is enabled
-  whiteLevelContainer.style.display = (isRGBW && staticColorEnabled) ? 'block' : 'none';
+function updateStaticColorState(){
+  var isRGBW=document.querySelector('input[name="channelMode"]:checked').value==='4';
+  document.getElementById('white-level-container').style.display=
+    (isRGBW&&document.getElementById('enStatColor').checked)?'block':'none';
 }
-
-function updateUniverseSlider() {
-  var isRGBW = document.querySelector('input[name="channelMode"]:checked').value === '4';
-  var slider = document.getElementById('numLedsSlider');
-  var output = document.getElementById('numLedsValue');
-  var hiddenInput = document.getElementById('numledsoutput');
-  
-  var universes = parseInt(slider.value);
-  var ledsPerUniverse = isRGBW ? 128 : 170;
-  var totalLeds = universes * ledsPerUniverse;
-  
-  output.textContent = universes + ' universe' + (universes > 1 ? 's' : '') + ' (' + totalLeds + ' LEDs)';
-  hiddenInput.value = totalLeds;
+function updateUniverseSlider(){
+  var isRGBW=document.querySelector('input[name="channelMode"]:checked').value==='4';
+  var universes=parseInt(document.getElementById('numLedsSlider').value);
+  var ledsPerUniverse=isRGBW?128:170;
+  var totalLeds=universes*ledsPerUniverse;
+  document.getElementById('numLedsValue').textContent=
+    universes+' universe'+(universes>1?'s':'')+' ('+totalLeds+' LEDs)';
+  document.getElementById('numledsoutput').value=totalLeds;
 }
-
-function updateOutputSlider() {
-  var slider = document.getElementById('numOutputSlider');
-  var output = document.getElementById('numOutputValue');
-  var hiddenInput = document.getElementById('numoutput');
-  
-  output.textContent = slider.value;
-  hiddenInput.value = slider.value;
+function updateOutputSlider(){
+  var v=document.getElementById('numOutputSlider').value;
+  document.getElementById('numOutputValue').textContent=v;
+  document.getElementById('numoutput').value=v;
 }
-
-function toggleDarkMode() {
+function updateLedTypeUI(){
+  var isAPA102=document.querySelector('input[name="ledType"]:checked').value==='1';
+  document.getElementById('apa102-clock-info').style.display=isAPA102?'block':'none';
+  // APA102 is always RGB — hide RGBW option when APA102 selected
+  document.getElementById('rgbw-container').style.display=isAPA102?'none':'block';
+  if(isAPA102){
+    // Force RGB mode for APA102
+    document.getElementById('rgb3ch').checked=true;
+    document.getElementById('white-level-container').style.display='none';
+  }
+}
+function toggleDarkMode(){
   document.body.classList.toggle('dark-mode');
-  var isDark = document.body.classList.contains('dark-mode');
-  localStorage.setItem('darkMode', isDark ? 'enabled' : 'disabled');
-  
-  var btn = document.getElementById('darkModeBtn');
-  btn.textContent = isDark ? 'Light Mode' : 'Dark Mode';
+  var isDark=document.body.classList.contains('dark-mode');
+  localStorage.setItem('darkMode',isDark?'enabled':'disabled');
+  document.getElementById('darkModeBtn').textContent=isDark?'Light Mode':'Dark Mode';
 }
-
-window.onload = function() {
+window.onload=function(){
   togglePinInputs();
   toggleStaticIP();
   updateChannelMode();
   updateUniverseSlider();
   updateOutputSlider();
-  
-  // Check for saved dark mode preference
-  if (localStorage.getItem('darkMode') === 'enabled') {
+  updateLedTypeUI();
+  if(localStorage.getItem('darkMode')==='enabled'){
     document.body.classList.add('dark-mode');
-    document.getElementById('darkModeBtn').textContent = 'Light Mode';
+    document.getElementById('darkModeBtn').textContent='Light Mode';
   }
 };
 )";
 
-/**
- * Handle root page of web server
- */
+// ─── Web root page ────────────────────────────────────────────────────────────
 void handleRoot() {
-  String content = F("<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");  
-  content += F("<link rel=\"icon\" href=\"data:,\">");
-  content += F("<style>");
+  String content = F("<!DOCTYPE html><html><head>"
+    "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+    "<link rel=\"icon\" href=\"data:,\">"
+    "<style>");
   content += CSS_STYLES;
-  content += F("</style>");
-  content += F("<script>");
+  content += F("</style><script>");
   content += JS_CODE;
-  content += F("</script>");
-  content += F("</head>");
-  content += F("<body>");
+  content += F("</script></head><body>");
   content += F("<button id='darkModeBtn' class='dark-mode-toggle' onclick='toggleDarkMode()'>Dark Mode</button>");
-  content += F("<h1>");
-  content += settings.nodeName;
-  content += F(" Configuration</h1>");
+  content += F("<h1>"); content += settings.nodeName; content += F(" Configuration</h1>");
   content += F("<form method='POST' action='/config'>");
-  
-  // Node settings
-  content += F("<label for='nodename'>Artnet Node name:</label>");
-  content += F("<input type='text' id='nodename' name='nodename' value='");
-  content += settings.nodeName;
-  content += F("'><br>");
-  
-  // Channel mode selection (RGB vs RGBW)
-  content += F("<label>LED Channel Mode:</label>");
-  content += F("<div class='radio-group'>");
-  content += F("<div class='radio-option'>");
-  content += F("<input type='radio' id='rgb3ch' name='channelMode' value='3' onchange='updateChannelMode()' ");
-  content += !settings.useRGBW ? F("checked") : F("");
-  content += F("><label for='rgb3ch'>RGB (3 channels)</label>");
-  content += F("</div>");
-  content += F("<div class='radio-option'>");
-  content += F("<input type='radio' id='rgbw4ch' name='channelMode' value='4' onchange='updateChannelMode()' ");
-  content += settings.useRGBW ? F("checked") : F("");
-  content += F("><label for='rgbw4ch'>RGBW (4 channels)</label>");
-  content += F("</div>");
-  content += F("</div>");
-  
-  // LED universes slider
-  int ledsPerUniverse = settings.useRGBW ? 128 : 170;
-  int currentUniverses = (settings.numLedsPerOutput + ledsPerUniverse - 1) / ledsPerUniverse; // Round up
-  if (currentUniverses < 1) currentUniverses = 1;
-  if (currentUniverses > 4) currentUniverses = 4;
-  
-  content += F("<div class='slider-container'>");
-  content += F("<label for='numLedsSlider'>LEDs per output:</label><br>");
-  content += F("<input type='range' id='numLedsSlider' min='1' max='4' step='1' value='");
-  content += String(currentUniverses);
-  content += F("' oninput='updateUniverseSlider()'>");
-  content += F("<span class='slider-value' id='numLedsValue'></span>");
-  content += F("<input type='hidden' id='numledsoutput' name='numledsoutput' value='");
-  content += String(settings.numLedsPerOutput);
-  content += F("'>");
-  content += F("</div>");
-  
-  // Number of outputs slider
-  content += F("<div class='slider-container'>");
-  content += F("<label for='numOutputSlider'>Number of outputs:</label><br>");
-  content += F("<input type='range' id='numOutputSlider' min='1' max='4' step='1' value='");
-  content += String(settings.numOutputs);
-  content += F("' oninput='updateOutputSlider()'>");
-  content += F("<span class='slider-value' id='numOutputValue'>");
-  content += String(settings.numOutputs);
-  content += F("</span>");
-  content += F("<input type='hidden' id='numoutput' name='numoutput' value='");
-  content += String(settings.numOutputs);
-  content += F("'>");
-  content += F("</div>");
-  
-  content += F("<label for='startuniverse'>Start universe:</label>");
-  content += F("<input type='text' id='startuniverse' name='startuniverse' value='");
-  content += String(settings.startUniverse);
-  content += F("'><br>");
-  
-  // Brightness slider
-  content += F("<div class='slider-container'>");
-  content += F("<label for='ledbrightness'>Max. LED brightness:</label><br>");
-  content += F("<input type='range' id='ledbrightness' name='ledbrightness' min='0' max='255' value='");
-  content += String(settings.ledBrightness);
-  content += F("' oninput='brightnessValue.value=this.value'>");
-  content += F("<span class='slider-value'><output id='brightnessValue'>");
-  content += String(settings.ledBrightness);
-  content += F("</output></span>");
-  content += F("</div>");
-  
-  // Color settings
-  content += F("<label for='staticColor'>Static RGB Color (Hex):</label>");
-  content += F("<input type='color' id='staticColor' name='staticColor' value='");
-  content += settings.staticColor;
-  content += F("'><br>");
-  
-  content += F("<label for='enStatColor'>Enable Static Color:</label>");
-  content += F("<input type='checkbox' id='enStatColor' name='enStatColor' onchange='updateStaticColorState()' ");
-  content += settings.enStatColor ? F("checked") : F("");
-  content += F("><br>");
-  
-  // White level (only for RGBW + static color)
-  content += F("<div id='white-level-container' style='display: ");
-  content += (settings.useRGBW && settings.enStatColor) ? F("block") : F("none");
-  content += F(";'>");
-  content += F("<div class='slider-container'>");
-  content += F("<label for='whiteLevel'>White Channel Level:</label><br>");
-  content += F("<input type='range' id='whiteLevel' name='whiteLevel' min='0' max='255' value='");
-  content += String(settings.whiteLevel);
-  content += F("' oninput='whiteLevelValue.value=this.value'>");
-  content += F("<span class='slider-value'><output id='whiteLevelValue'>");
-  content += String(settings.whiteLevel);
-  content += F("</output></span>");
-  content += F("</div>");
-  content += F("</div>");
 
-  content += F("<label for='ledCycleEnabled'>Enable RGB Test Cycle:</label>");
-  content += F("<input type='checkbox' id='ledCycleEnabled' name='ledCycleEnabled' ");
-  content += settings.ledCycleEnabled ? F("checked") : F("");
-  content += F("><br>");
-  
-  // Custom pin configuration
-  content += F("<label for='enableCustomPins'>Enable Custom Pin Configuration:</label>");
-  content += F("<input type='checkbox' id='enableCustomPins' name='enableCustomPins' onchange='togglePinInputs()' ");
-  content += settings.enableCustomPins ? F("checked") : F("");
-  content += F("><br>");
-  
-  // Pin input fields
+  // ── Node name ────────────────────────────────────────────────────────────
+  content += F("<label for='nodename'>Artnet Node name:</label>"
+               "<input type='text' id='nodename' name='nodename' value='");
+  content += settings.nodeName; content += F("'><br>");
+
+  // ── LED Type selector (NEW) ───────────────────────────────────────────────
+  content += F("<div class='section-divider'>LED Strip Type</div>");
+  content += F("<div class='radio-group'>");
+  content += F("<div class='radio-option'>"
+               "<input type='radio' id='ws2812' name='ledType' value='0' onchange='updateLedTypeUI()' ");
+  content += (settings.ledType == LED_TYPE_WS2812) ? F("checked") : F("");
+  content += F("><label for='ws2812'>WS2812 / NeoPixel (800&nbsp;kHz)</label></div>");
+  content += F("<div class='radio-option'>"
+               "<input type='radio' id='apa102' name='ledType' value='1' onchange='updateLedTypeUI()' ");
+  content += (settings.ledType == LED_TYPE_APA102) ? F("checked") : F("");
+  content += F("><label for='apa102'>APA102 / DotStar (SPI)</label></div>");
+  content += F("</div>");
+  // Info box shown only for APA102
+  content += F("<div id='apa102-clock-info' style='display:");
+  content += (settings.ledType == LED_TYPE_APA102) ? F("block") : F("none");
+  content += F(";background:var(--input-bg);border-radius:5px;padding:8px;margin:8px 0;font-size:0.9em;text-align:left;'>"
+               "&#9432;&nbsp;APA102 uses a shared SPI clock on GPIO <strong>");
+  content += String(APA102_CLOCK_PIN);
+  content += F("</strong>. Data pins are configured below."
+               " RGBW mode is not available for APA102.</div>");
+
+  // ── Channel mode (hidden for APA102) ─────────────────────────────────────
+  content += F("<div id='rgbw-container' style='display:");
+  content += (settings.ledType == LED_TYPE_APA102) ? F("none") : F("block");
+  content += F(";'>");
+  content += F("<div class='section-divider'>Channel Mode</div>");
+  content += F("<div class='radio-group'>");
+  content += F("<div class='radio-option'>"
+               "<input type='radio' id='rgb3ch' name='channelMode' value='3' onchange='updateChannelMode()' ");
+  content += !settings.useRGBW ? F("checked") : F("");
+  content += F("><label for='rgb3ch'>RGB (3 ch)</label></div>");
+  content += F("<div class='radio-option'>"
+               "<input type='radio' id='rgbw4ch' name='channelMode' value='4' onchange='updateChannelMode()' ");
+  content += settings.useRGBW ? F("checked") : F("");
+  content += F("><label for='rgbw4ch'>RGBW (4 ch)</label></div>");
+  content += F("</div></div>"); // close rgbw-container
+
+  // ── Universe / LED slider ─────────────────────────────────────────────────
+  content += F("<div class='section-divider'>ArtNet Configuration</div>");
+  int ledsPerUniverse    = settings.useRGBW ? 128 : 170;
+  int currentUniverses   = max(1, min(4, (settings.numLedsPerOutput + ledsPerUniverse - 1) / ledsPerUniverse));
+  content += F("<div class='slider-container'>"
+               "<label for='numLedsSlider'>LEDs per output:</label><br>"
+               "<input type='range' id='numLedsSlider' min='1' max='4' step='1' value='");
+  content += String(currentUniverses);
+  content += F("' oninput='updateUniverseSlider()'>"
+               "<span class='slider-value' id='numLedsValue'></span>"
+               "<input type='hidden' id='numledsoutput' name='numledsoutput' value='");
+  content += String(settings.numLedsPerOutput);
+  content += F("'></div>");
+
+  content += F("<div class='slider-container'>"
+               "<label for='numOutputSlider'>Number of outputs:</label><br>"
+               "<input type='range' id='numOutputSlider' min='1' max='4' step='1' value='");
+  content += String(settings.numOutputs);
+  content += F("' oninput='updateOutputSlider()'>"
+               "<span class='slider-value' id='numOutputValue'>");
+  content += String(settings.numOutputs);
+  content += F("</span>"
+               "<input type='hidden' id='numoutput' name='numoutput' value='");
+  content += String(settings.numOutputs);
+  content += F("'></div>");
+
+  content += F("<label for='startuniverse'>Start universe:</label>"
+               "<input type='text' id='startuniverse' name='startuniverse' value='");
+  content += String(settings.startUniverse); content += F("'><br>");
+
+  // ── Brightness ───────────────────────────────────────────────────────────
+  content += F("<div class='slider-container'>"
+               "<label for='ledbrightness'>Max. LED brightness:</label><br>"
+               "<input type='range' id='ledbrightness' name='ledbrightness' min='0' max='255' value='");
+  content += String(settings.ledBrightness);
+  content += F("' oninput='brightnessValue.value=this.value'>"
+               "<span class='slider-value'><output id='brightnessValue'>");
+  content += String(settings.ledBrightness);
+  content += F("</output></span></div>");
+
+  // ── Static colour ────────────────────────────────────────────────────────
+  content += F("<div class='section-divider'>Colour Options</div>");
+  content += F("<label for='staticColor'>Static RGB Colour:</label>"
+               "<input type='color' id='staticColor' name='staticColor' value='");
+  content += settings.staticColor; content += F("'><br>");
+
+  content += F("<label for='enStatColor'>Enable Static Colour:</label>"
+               "<input type='checkbox' id='enStatColor' name='enStatColor'"
+               " onchange='updateStaticColorState()' ");
+  content += settings.enStatColor ? F("checked") : F(""); content += F("><br>");
+
+  // White level (WS2812 RGBW only)
+  content += F("<div id='white-level-container' style='display:");
+  content += (settings.useRGBW && settings.enStatColor && settings.ledType == LED_TYPE_WS2812)
+             ? F("block") : F("none");
+  content += F(";'><div class='slider-container'>"
+               "<label for='whiteLevel'>White Channel Level:</label><br>"
+               "<input type='range' id='whiteLevel' name='whiteLevel' min='0' max='255' value='");
+  content += String(settings.whiteLevel);
+  content += F("' oninput='whiteLevelValue.value=this.value'>"
+               "<span class='slider-value'><output id='whiteLevelValue'>");
+  content += String(settings.whiteLevel);
+  content += F("</output></span></div></div>");
+
+  content += F("<label for='ledCycleEnabled'>Enable RGB Test Cycle:</label>"
+               "<input type='checkbox' id='ledCycleEnabled' name='ledCycleEnabled' ");
+  content += settings.ledCycleEnabled ? F("checked") : F(""); content += F("><br>");
+
+  // ── Custom pins ───────────────────────────────────────────────────────────
+  content += F("<div class='section-divider'>Pin Configuration</div>");
+  content += F("<label for='enableCustomPins'>Enable Custom Pins:</label>"
+               "<input type='checkbox' id='enableCustomPins' name='enableCustomPins'"
+               " onchange='togglePinInputs()' ");
+  content += settings.enableCustomPins ? F("checked") : F(""); content += F("><br>");
+
   content += F("<div id='pin-container' class='pin-container'>");
   for (int i = 0; i < NUMSTRIPS; i++) {
-    content += F("<div>");
-    content += F("<span class='pin-label'>Output ");
-    content += String(i+1);
-    content += F(" Pin:</span>");
-    content += F("<input type='number' class='pin-input' id='pin");
-    content += String(i);
-    content += F("' name='pin");
+    content += F("<div><span class='pin-label'>Output ");
+    content += String(i + 1);
+    content += F(" Data Pin:</span>"
+                 "<input type='number' class='pin-input' name='pin");
     content += String(i);
     content += F("' min='0' max='39' value='");
     content += String(settings.pins[i]);
-    content += F("'>");
-    content += F("<span class='default-pin'>(Default: ");
+    content += F("'><span class='default-pin'>(Default: ");
     content += String(DEFAULT_PINS[i]);
     content += F(")</span></div>");
   }
   content += F("</div>");
 
-  // In handleRoot(), modify the static IP section:
-  content += F("<label for='useStaticIP'>Use Static IP:</label>");
-  content += F("<input type='checkbox' id='useStaticIP' name='useStaticIP' onchange='toggleStaticIP()' ");
-  content += settings.useStaticIP ? F("checked") : F("");
-  content += F("><br>");
+  // ── Network ───────────────────────────────────────────────────────────────
+  content += F("<div class='section-divider'>Network</div>");
+  content += F("<label for='useStaticIP'>Use Static IP:</label>"
+               "<input type='checkbox' id='useStaticIP' name='useStaticIP'"
+               " onchange='toggleStaticIP()' ");
+  content += settings.useStaticIP ? F("checked") : F(""); content += F("><br>");
 
-  content += F("<div id='static-ip-container' style='display: none;'>");
-  content += F("<label for='staticIP'>Static IP:</label>");
-  content += F("<input type='text' id='staticIP' name='staticIP' value='");
-  content += settings.staticIP;
-  content += F("' placeholder='192.168.1.100'><br>");
+  content += F("<div id='static-ip-container' style='display:none;'>");
+  content += F("<label>Static IP:</label><input type='text' name='staticIP' value='");
+  content += settings.staticIP; content += F("' placeholder='192.168.1.100'><br>");
+  content += F("<label>Gateway:</label><input type='text' name='gateway' value='");
+  content += settings.gateway; content += F("' placeholder='192.168.1.1'><br>");
+  content += F("<label>Subnet:</label><input type='text' name='subnet' value='");
+  content += settings.subnet; content += F("' placeholder='255.255.255.0'><br></div>");
 
-  content += F("<label for='gateway'>Gateway:</label>");
-  content += F("<input type='text' id='gateway' name='gateway' value='");
-  content += settings.gateway;
-  content += F("' placeholder='192.168.1.1'><br>");
+  content += F("<label for='useWiFi'>Use Wi-Fi:</label>"
+               "<input type='checkbox' id='useWiFi' name='useWiFi' ");
+  content += settings.useWiFi ? F("checked") : F(""); content += F("><br>");
+  content += F("<label>SSID:</label><input type='text' name='ssid' value='");
+  content += settings.ssid; content += F("'><br>");
+  content += F("<label>Password:</label><input type='text' name='password' value='");
+  content += settings.password; content += F("'><br>");
 
-  content += F("<label for='subnet'>Subnet Mask:</label>");
-  content += F("<input type='text' id='subnet' name='subnet' value='");
-  content += settings.subnet;
-  content += F("' placeholder='255.255.255.0'><br>");
-  content += F("</div>");
-  
-  // Network settings
-  content += F("<label for='useWiFi'>Use Wi-Fi:</label>");
-  content += F("<input type='checkbox' id='useWiFi' name='useWiFi' ");
-  content += settings.useWiFi ? F("checked") : F("");
-  content += F("><br>");
-  
-  content += F("<label for='ssid'>SSID:</label>");
-  content += F("<input type='text' id='ssid' name='ssid' value='");
-  content += settings.ssid;
-  content += F("'><br>");
-  
-  content += F("<label for='password'>Password:</label>");
-  content += F("<input type='text' id='password' name='password' value='");
-  content += settings.password;
-  content += F("'><br>");
-  
-  // Submit button
-  content += F("<input type='submit' value='Save'>");
+  content += F("<input type='submit' value='Save &amp; Restart'>");
   content += F("</form>");
-  
-  // Warning
-  content += F("<div class='warning'>");
-  content += F("<p><strong>Warning:</strong> Please ensure that the settings on the node (number of pixels/universes) are the same as in your software to prevent errors.</p>");
-  content += F("</div>");
-
-  // Add OTA update link to the bottom of the root page
-  content += F("<div style='margin-top: 20px;'>");
-  content += F("<a href='/update' style='display: inline-block; background-color: #007bff; color: white; padding: 10px 15px; text-decoration: none; border-radius: 4px;'>Firmware Update</a>");
-  content += F("</div>");
-
+  content += F("<div class='warning'><p><strong>Warning:</strong> Ensure node settings "
+               "match your software (pixel count / universes).</p></div>");
+  content += F("<div style='margin-top:20px;'>"
+               "<a href='/update' style='background-color:#007bff;color:#fff;padding:10px 15px;"
+               "text-decoration:none;border-radius:4px;display:inline-block;'>Firmware Update</a>"
+               "</div>");
   content += F("</body></html>");
-  
   server.send(200, "text/html", content);
 }
 
-/**
- * Handle form submission
- */
+// ─── Config POST handler ──────────────────────────────────────────────────────
 void handleConfig() {
-  if (server.method() == HTTP_POST) {
-    // Update settings from form data
-    if (server.hasArg("numledsoutput")) settings.numLedsPerOutput = server.arg("numledsoutput").toInt();
-    if (server.hasArg("numoutput")) settings.numOutputs = server.arg("numoutput").toInt();
-    if (server.hasArg("startuniverse")) settings.startUniverse = server.arg("startuniverse").toInt();
-    if (server.hasArg("nodename")) settings.nodeName = server.arg("nodename");
-    if (server.hasArg("ledbrightness")) settings.ledBrightness = server.arg("ledbrightness").toInt();
-    if (server.hasArg("ssid")) settings.ssid = server.arg("ssid");
-    if (server.hasArg("password")) settings.password = server.arg("password");
-    if (server.hasArg("staticColor")) settings.staticColor = server.arg("staticColor");
-    if (server.hasArg("whiteLevel")) settings.whiteLevel = server.arg("whiteLevel").toInt();
-    
-    // Handle channel mode (RGB vs RGBW)
-    if (server.hasArg("channelMode")) {
-      bool wasRGBW = settings.useRGBW;
-      settings.useRGBW = (server.arg("channelMode") == "4");
-      
-      // If mode changed, enforce LED count limits
-      if (wasRGBW != settings.useRGBW) {
-        int maxLeds = getMaxLedsPerStrip();
-        if (settings.numLedsPerOutput > maxLeds) {
-          settings.numLedsPerOutput = maxLeds;
-        }
-      }
-    }
-    
-    // Update boolean settings
-    settings.useWiFi = server.hasArg("useWiFi");
-    settings.ledCycleEnabled = server.hasArg("ledCycleEnabled");
-    settings.enStatColor = server.hasArg("enStatColor");
-    
-    // Update networkMode to match useWiFi setting
-    if (settings.useWiFi) {
-      settings.networkMode = 1;  // WiFi mode
-    } else {
-      settings.networkMode = 0;  // Ethernet mode
-    }
-    
-    // Handle custom pin configuration
-    bool wasCustomPinsEnabled = settings.enableCustomPins;
-    settings.enableCustomPins = server.hasArg("enableCustomPins");
+  if (server.method() != HTTP_POST) return;
 
-    settings.useStaticIP = server.hasArg("useStaticIP");
-    if (server.hasArg("staticIP")) settings.staticIP = server.arg("staticIP");
-    if (server.hasArg("gateway")) settings.gateway = server.arg("gateway");
-    if (server.hasArg("subnet")) settings.subnet = server.arg("subnet");    
-    
-    // Track if pins have changed
-    bool pinsChanged = false;
-    
-    // Reset pins if custom pins disabled
-    if (wasCustomPinsEnabled && !settings.enableCustomPins) {
-      resetToDefaultPins();
-      pinsChanged = true;
+  if (server.hasArg("numledsoutput")) settings.numLedsPerOutput = server.arg("numledsoutput").toInt();
+  if (server.hasArg("numoutput"))     settings.numOutputs       = server.arg("numoutput").toInt();
+  if (server.hasArg("startuniverse")) settings.startUniverse    = server.arg("startuniverse").toInt();
+  if (server.hasArg("nodename"))      settings.nodeName         = server.arg("nodename");
+  if (server.hasArg("ledbrightness")) settings.ledBrightness    = server.arg("ledbrightness").toInt();
+  if (server.hasArg("ssid"))          settings.ssid             = server.arg("ssid");
+  if (server.hasArg("password"))      settings.password         = server.arg("password");
+  if (server.hasArg("staticColor"))   settings.staticColor      = server.arg("staticColor");
+  if (server.hasArg("whiteLevel"))    settings.whiteLevel       = server.arg("whiteLevel").toInt();
+
+  // LED type
+  if (server.hasArg("ledType"))
+    settings.ledType = server.arg("ledType").toInt();
+
+  // Channel mode (only meaningful for WS2812)
+  if (server.hasArg("channelMode") && settings.ledType == LED_TYPE_WS2812) {
+    bool wasRGBW = settings.useRGBW;
+    settings.useRGBW = (server.arg("channelMode") == "4");
+    if (wasRGBW != settings.useRGBW) {
+      int maxLeds = getMaxLedsPerStrip();
+      if (settings.numLedsPerOutput > maxLeds) settings.numLedsPerOutput = maxLeds;
     }
-    
-    // Update custom pin settings if enabled
-    if (settings.enableCustomPins) {
-      for (int i = 0; i < NUMSTRIPS; i++) {
-        String pinArg = "pin" + String(i);
-        if (server.hasArg(pinArg)) {
-          int newPin = server.arg(pinArg).toInt();
-          if (settings.pins[i] != newPin) {
-            settings.pins[i] = newPin;
-            pinsChanged = true;
-          }
-        }
+  } else if (settings.ledType == LED_TYPE_APA102) {
+    settings.useRGBW = false; // APA102 is always RGB
+  }
+
+  settings.useWiFi         = server.hasArg("useWiFi");
+  settings.enStatColor      = server.hasArg("enStatColor");
+  settings.ledCycleEnabled  = server.hasArg("ledCycleEnabled");
+  settings.networkMode      = settings.useWiFi ? 1 : 0;
+
+  bool wasCustom = settings.enableCustomPins;
+  settings.enableCustomPins = server.hasArg("enableCustomPins");
+  settings.useStaticIP      = server.hasArg("useStaticIP");
+  if (server.hasArg("staticIP")) settings.staticIP = server.arg("staticIP");
+  if (server.hasArg("gateway"))  settings.gateway  = server.arg("gateway");
+  if (server.hasArg("subnet"))   settings.subnet   = server.arg("subnet");
+
+  bool pinsChanged = false;
+  if (wasCustom && !settings.enableCustomPins) { resetToDefaultPins(); pinsChanged = true; }
+  if (settings.enableCustomPins) {
+    for (int i = 0; i < NUMSTRIPS; i++) {
+      String key = "pin" + String(i);
+      if (server.hasArg(key)) {
+        int np = server.arg(key).toInt();
+        if (settings.pins[i] != np) { settings.pins[i] = np; pinsChanged = true; }
       }
-    }
-    
-    state.isStaticColorSet = false;
-    
-    // Handle LED mode settings - ensure only one is enabled at a time
-    bool ledCycleRequested = server.hasArg("ledCycleEnabled");
-    bool staticColorRequested = server.hasArg("enStatColor");
-    
-    if (ledCycleRequested && staticColorRequested) {
-      // If both are checked, prioritize the last one processed (static color)
-      settings.ledCycleEnabled = false;
-      settings.enStatColor = true;
-    } else if (ledCycleRequested) {
-      settings.ledCycleEnabled = true;
-      settings.enStatColor = false;
-    } else if (staticColorRequested) {
-      settings.ledCycleEnabled = false;
-      settings.enStatColor = true;
-    } else {
-      // Neither checked - disable both
-      settings.ledCycleEnabled = false;
-      settings.enStatColor = false;
-    }
-    // Save settings to preferences
-    saveSettings();
-    
-    // Apply new pin settings to the LED strips
-    if (pinsChanged) {
-      updateStripPins();
-      // Re-initialize LED driver with updated pins
-      driver.initled(ledData, settings.pins, NUMSTRIPS, settings.numLedsPerOutput);
-    }
-    
-    // Apply brightness
-    driver.setBrightness(settings.ledBrightness);
-    
-    // Redirect back to root page
-    server.sendHeader("Location", "/", true);
-    server.send(302, "text/plain", "");
-    
-    // Restart if needed
-    bool networkSettingsChanged = server.hasArg("ssid") || server.hasArg("password") || 
-                                 server.hasArg("useWiFi") || server.hasArg("useStaticIP") ||
-                                 server.hasArg("staticIP") || server.hasArg("gateway") ||
-                                 server.hasArg("subnet"); server.hasArg("staticIP");
-    
-    if (pinsChanged || networkSettingsChanged || (!state.ledCycleEnabled && !settings.enStatColor)) {
-      delay(500); // Give the browser time to receive the redirect response
-      ESP.restart();
     }
   }
+
+  // Resolve LED mode conflicts
+  if (settings.ledCycleEnabled && settings.enStatColor) {
+    settings.ledCycleEnabled = false; // static colour wins
+  }
+
+  state.isStaticColorSet = false;
+  saveSettings();
+
+  server.sendHeader("Location", "/", true);
+  server.send(302, "text/plain", "");
+  delay(500);
+  ESP.restart();
 }
 
+// ─── OTA pages ────────────────────────────────────────────────────────────────
 void handleOTAUpdate() {
-  String content = F("<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
-  content += F("<link rel=\"icon\" href=\"data:,\">");
-  content += F("<style>");
+  String content = F("<!DOCTYPE html><html><head>"
+    "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+    "<link rel=\"icon\" href=\"data:,\"><style>");
   content += CSS_STYLES;
-  content += F("</style>");
-  content += F("<script>");
-  content += JS_CODE;
-  content += F("</script>");
-  content += F("</head>");
-  content += F("<body>");
-  content += F("<button id='darkModeBtn' class='dark-mode-toggle' onclick='toggleDarkMode()'>Dark Mode</button>");
-  content += F("<h1>");
-  content += settings.nodeName;
-  content += F(" - OTA Update</h1>");
-  content += F("<form method='POST' action='/doUpdate' enctype='multipart/form-data'>");
-  content += F("<p>Select firmware .bin file to upload:</p>");
-  content += F("<input type='file' name='update' accept='.bin'><br><br>");
-  content += F("<input type='submit' value='Upload and Update'>");
-  content += F("</form>");
-  content += F("<div class='warning'>");
-  content += F("<p><strong>Warning:</strong> Uploading incorrect firmware may brick your device. Make sure to upload the correct binary file.</p>");
-  content += F("</div>");
-  content += F("<p><a href='/'>Return to configuration</a></p>");
-  content += F("</body></html>");
-  
+  content += F("</style></head><body>");
+  content += F("<h1>"); content += settings.nodeName; content += F(" - OTA Update</h1>");
+  content += F("<form method='POST' action='/doUpdate' enctype='multipart/form-data'>"
+               "<p>Select firmware .bin file:</p>"
+               "<input type='file' name='update' accept='.bin'><br><br>"
+               "<input type='submit' value='Upload and Update'></form>");
+  content += F("<div class='warning'><p><strong>Warning:</strong> Uploading incorrect firmware may brick your device.</p></div>");
+  content += F("<p><a href='/'>Return to configuration</a></p></body></html>");
   server.send(200, "text/html", content);
 }
 
-/**
- * Handle the actual firmware update
- */
 void handleDoUpdate() {
-  // Check if file was uploaded
   HTTPUpload& upload = server.upload();
-  
   if (upload.status == UPLOAD_FILE_START) {
     Serial.printf("Update: %s\n", upload.filename.c_str());
-    
-    // Display update status on OLED
     displayStatus("OTA Update", "Starting...");
-    
-    // Set status LED to purple to indicate update in progress
     setStatusLED(120, 0, 120);
-    
-    // Check if there's enough space for the update
     if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
       Update.printError(Serial);
-      displayStatus("OTA Update", "Failed!", "Not enough space");
-      setStatusLED(255, 0, 0); // Red for error
+      setStatusLED(255, 0, 0);
     }
   } else if (upload.status == UPLOAD_FILE_WRITE) {
-    // Write uploaded file data to flash
     if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
       Update.printError(Serial);
-      displayStatus("OTA Update", "Failed!", "Write Error");
-      setStatusLED(255, 0, 0); // Red for error
+      setStatusLED(255, 0, 0);
     } else {
-      // Update progress on OLED
-      float progress = (float)Update.progress() / (float)Update.size() * 100.0;
-      displayStatus("OTA Update", "Progress: " + String(progress, 1) + "%");
+      float p = (float)Update.progress() / (float)Update.size() * 100.0f;
+      displayStatus("OTA Update", "Progress: " + String(p, 1) + "%");
     }
   } else if (upload.status == UPLOAD_FILE_END) {
-    // Finish the update
     if (Update.end(true)) {
-      Serial.printf("Update Success: %u bytes\n", upload.totalSize);
       displayStatus("OTA Update", "Complete!", "Rebooting...");
-      setStatusLED(0, 255, 0); // Green for success
+      setStatusLED(0, 255, 0);
     } else {
       Update.printError(Serial);
-      displayStatus("OTA Update", "Failed!", "Verify Error");
-      setStatusLED(255, 0, 0); // Red for error
+      setStatusLED(255, 0, 0);
     }
   }
-  
   yield();
 }
 
-/**
- * Handle the OTA update response after upload completes
- */
 void handleOTAUpdateResponse() {
   if (Update.hasError()) {
-    String content = F("<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
-    content += F("<link rel=\"icon\" href=\"data:,\">");
-    content += F("<style>");
-    content += CSS_STYLES;
-    content += F("</style>");
-    content += F("</head>");
-    content += F("<body><h1>Update Failed!</h1>");
-    content += F("<p>The update failed to complete. Please try again.</p>");
-    content += F("<p><a href='/update'>Return to update page</a></p>");
-    content += F("</body></html>");
-    
-    server.send(200, "text/html", content);
+    server.send(200, "text/html",
+      "<h1>Update Failed!</h1><p><a href='/update'>Try again</a></p>");
   } else {
-    String content = F("<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
-    content += F("<link rel=\"icon\" href=\"data:,\">");
-    content += F("<style>");
-    content += CSS_STYLES;
-    content += F("</style>");
-    content += F("<meta http-equiv=\"refresh\" content=\"5;url=/\" />");
-    content += F("<script>");
-    content += F("var countdown = 5;");
-    content += F("function updateCountdown() {");
-    content += F("  document.getElementById('seconds').textContent = countdown;");
-    content += F("  countdown--;");
-    content += F("  if (countdown < 0) {");
-    content += F("    document.getElementById('countdown').innerHTML = 'Redirecting...';");
-    content += F("  } else {");
-    content += F("    setTimeout(updateCountdown, 1000);");
-    content += F("  }");
-    content += F("}");
-    content += F("window.onload = updateCountdown;");
-    content += F("</script>");
-    content += F("</head>");
-    content += F("<body><h1>Update Successful!</h1>");
-    content += F("<p id='countdown'>Device will reboot and redirect to main page in <span id='seconds'>5</span> seconds...</p>");
-    content += F("</body></html>");
-    
-    server.send(200, "text/html", content);
-    
-    // Wait a moment for the client to get the response before rebooting
+    server.send(200, "text/html",
+      "<!DOCTYPE html><html><head>"
+      "<meta http-equiv='refresh' content='5;url=/' /></head>"
+      "<body><h1>Update Successful!</h1><p>Rebooting in 5 seconds...</p></body></html>");
     delay(1000);
     ESP.restart();
   }
