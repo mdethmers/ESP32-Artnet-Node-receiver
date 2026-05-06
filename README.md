@@ -14,7 +14,8 @@ Node & Resolume Arena configuration: https://www.youtube.com/watch?v=1a7sWZTA7lg
 ## Features
 
 - 4 Outputs, 16 Universes in Total: Supports up to 4 LED strips with 4 universes per output, enabling large-scale LED installations.
-- Supports 3 (RGB) and 4 (RGBW) channel LED types.
+- Supports 3 (RGB), 4 (RGBW), and 5 (RGBAW) color order LEDs.
+- Supports 3-wire LEDs (WS28xx) and 4-wire  SPI clock-based LEDs (APA102).
 - Ethernet and Wi-Fi Support: Supports both wired and wireless Art-Net control for flexible connectivity.
 - AP Mode for Debugging: Easily configure the device in standalone mode without needing an external network.
 - Static IP option for permanent installations.
@@ -29,7 +30,7 @@ Node & Resolume Arena configuration: https://www.youtube.com/watch?v=1a7sWZTA7lg
 - Fully Open-Source: Includes PCB design and BOM, allowing users to build their own cost-effective controllers.
 
 ## PCB Design
-This is the ongoing PCB design, using 12v-to-5v step-down converters, Car-fuses for protection and screw terminals for easy connections. 
+This is the ongoing PCB design, using 12v-to-5v step-down converters, car fuses for protection and screw terminals for easy connections. 
 Project: https://oshwlab.com/matthijsdethmers/artnetnode-esp32
 EasyEDA Editor: https://easyeda.com/editor#project_id=86fd5b1121594bfa85fd2c5eed017e20
 
@@ -63,12 +64,13 @@ EasyEDA Editor: https://easyeda.com/editor#project_id=86fd5b1121594bfa85fd2c5eed
   - Update.h (OTA updates)
  
 ## Supported LED ICs
-All LEDs based on the wsXXXX series are supported. These can be 3 or 4 channel LEDs, as long as they have a single data line and 800Khz timing. These include, but are not limited to:
+All LEDs based on the wsXXXX and clocked LED series are supported. These can be 3, 4, or 5 channel LEDs. These include, but are not limited to:
   - WS2805, WS2811, WS2812, WS2813, WS2814, WS2815 (Tested)
+  - APA102, SK6812 SPI-based LEDs (Tested)
   - SK6812, SK6812W, SK6812-mini (Not tested)
   - GS8208, TM1814, TM1829, UCS8904, UCS8903, FW1906 (Not tested)
 
-Tests with SPI based leds like the APA102/107 are a work in progress, just like software support for 4 and 5 channel leds. Artnet works with 4/5 channel leds, but software support is coming!
+
 
 ## WLED
 Check this [youtube video](https://www.youtube.com/watch?v=f3e7oMOB8D4) on how to install WLED!
@@ -89,14 +91,14 @@ In LED preferences, set the number of LEDs to the number of universes you need (
 
 ## Access the Web Interface:
 - After uploading the code, connect your ESP32 to a network using the W5500 Ethernet module.
-- Set core debug level to "info" for extra infomration on performance
+- Set core debug level to "info" for extra information on performance
 - Find the IP address assigned to the ESP32 and open it in a web browser.
-  - To find the IP address easily, use Resolume advanced output. It will autodetect the Artnet node.
+  - To find the IP address easily, use Resolume's advanced output. It will autodetect the Artnet node.
  
 ## Mode switching with the Boot button
 The code allows you to use the boot button to switch between Ethernet, Wifi, AP, RGB Test cycle, and a static colour. In some of the modes, a long press allows you to change more settings by single pressing. Exit by long-pressing again.  
-- Ethernet > Long press > Switch between static IP / DCHP (WORKING!)
-- Wifi > Long press > Switch between static IP / DCHP (WORKING!)
+- Ethernet > Long press > Switch between static IP / DHCP (WORKING!)
+- Wifi > Long press > Switch between static IP / DHCP (WORKING!)
 - RGB Test cycle > Long press > Switch to other test pattern (Not implemented yet)
 - Static colour > Long press > Switch between 10 different colours (WORKING!)
 
@@ -132,10 +134,11 @@ Important! Be sure that the Universes/outputs/leds always match what you output.
 ## Pin/Setting/Config info
 - Default led strip pins are 12, 14, 27, 26 (more outputs can be added if necessary. Change config accordingly).
 - Default status led is set to pin 16.
+- SPI-based LED clock line can run from Pin 17. Never versions of the board have this pin connected in the connector. 
 - Pin 16/17 can be reprogrammed for new functionality/adding more outputs. (They are connected to the 5v level shifter). 
 - I2C pins for OLED are set to pins 21 and 22.
 - The default timeout is set to 30 seconds.
-- There is a 5V switch Where the 12v regulator sits. Use this if you power the node with 5v Intead of 12V! The esp and other logic will be powered from the 5v power supply instead of the 12v to 5v regulator. 
+- There is a 5V switch Where the 12v regulator sits. Use this if you power the node with 5V instead of 12V! The esp and other logic will be powered from the 5v power supply instead of the 12v to 5v regulator. 
 
 ### A note on direct Ethernet connection between Node and PC
 Sadly, the W5500 does not support Auto-MDI/MDIX, which means you need a crossover cable whenever you want to connect directly from your PC to the Node with an Ethernet cable!
@@ -144,11 +147,11 @@ Sadly, the W5500 does not support Auto-MDI/MDIX, which means you need a crossove
 To get you up and running with your node, I provide a basic setup example for Resolume. Other software will work similarly.
 1. Connect your node to a router (DHCP) or switch (Static IP) through Ethernet, wifi, or AP mode (192.168.4.1).
 2. Once your node is successfully connected to your network, navigate to the configuration page (192.168.1.xxx) and set the Node's Name, Number of outputs, and MAXIMUM Leds you connect to your output.
-3. Optional) Enable the RGB test cycle or Static color to test if all ouputs and LEDs behave as expected.
+3. Optional) Enable the RGB test cycle or Static color to test if all outputs and LEDs behave as expected.
 4. In Resolume, set the correct network adapter in Preferences>DMX.
 5. In Resolume's advanced output, add a new Lumiverse and add the LED strips.
 6. In Resolume's advanced output, set the IP address.
-7. The node supports 4 universes (680 LEDS) per output. If you need all 16 universes (680 leds per output), add 4 Lumiverse outputs and set the right universes per output. For output 1 that is start universe 0, For output 2 that is start universe 4, For output 3 that is start universe 8, For output 4 that is start universe 12. Change this corresponding to the number of universes per output that you need.
+7. The node supports 4 universes (680 LEDS) per output. If you need all 16 universes (680 leds per output), add 4 Lumiverse outputs and set the right universes per output. For output 1 that is start universe 0, For output 2 that is start universe 4, For output 3 that is start universe 8, For output 4 that is start universe 12. Change this to the number of universes per output that you need.
 8. Your strips should now light up!
 
 ## Open-Source Contributions
