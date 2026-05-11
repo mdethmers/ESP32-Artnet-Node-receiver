@@ -349,6 +349,9 @@ void setup() {
         driver.setBrightness(settings.ledBrightness);
         break;
     }
+    // Clear the buffer after driver init — prevents stale bytes causing
+    // a rogue full-white first LED when ArtNet data starts arriving.
+    memset(ledData, 0, sizeof(ledData));
   }
 
   // ── Networking ────────────────────────────────────────────────────────────
@@ -652,18 +655,36 @@ void applyStaticColor() {
   uint8_t b =  color        & 0xFF;
   setStatusLED(r, g, b);
 
-  if (settings.channelMode == CHANNEL_MODE_RGBWW && settings.ledType == LED_TYPE_WS2812) {
-    // Write 5-byte pixels directly into ledData for RGBWW
-    int total = settings.numOutputs * settings.numLedsPerOutput;
-    for (int i = 0; i < total; i++) {
-      ledData[i * 5 + 0] = r;
-      ledData[i * 5 + 1] = g;
-      ledData[i * 5 + 2] = b;
-      ledData[i * 5 + 3] = settings.whiteLevel;
-      ledData[i * 5 + 4] = settings.white2Level;
+  if (settings.ledType == LED_TYPE_WS2812) {
+    if (settings.channelMode == CHANNEL_MODE_RGBWW) {
+      // 5-byte pixels: R G B W1 W2
+      int total = settings.numOutputs * settings.numLedsPerOutput;
+      memset(ledData, 0, sizeof(ledData));  // clear first — fixes rogue first-LED white
+      for (int i = 0; i < total; i++) {
+        ledData[i * 5 + 0] = r;
+        ledData[i * 5 + 1] = g;
+        ledData[i * 5 + 2] = b;
+        ledData[i * 5 + 3] = settings.whiteLevel;
+        ledData[i * 5 + 4] = settings.white2Level;
+      }
+      driver.showPixels(NO_WAIT, ledData);
+
+    } else if (settings.channelMode == CHANNEL_MODE_RGBW) {
+      // 4-byte pixels: use Adafruit_NeoPixel with the 4-argument setPixelColor
+      for (int i = 0; i < settings.numOutputs; i++) {
+        for (int j = 0; j < settings.numLedsPerOutput; j++) {
+          strips[i].setPixelColor(j, r, g, b, settings.whiteLevel);  // W channel was missing!
+        }
+        strips[i].show();
+      }
+
+    } else {
+      // 3-byte RGB
+      setAllLeds(r, g, b);
     }
-    driver.showPixels(NO_WAIT, ledData);
+
   } else {
+    // APA102 — always RGB
     setAllLeds(r, g, b);
   }
 }
