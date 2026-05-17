@@ -95,7 +95,7 @@ void handleDoUpdate();
 void handleOTAUpdateResponse();
 void ESP32_W5500_onEvent();
 void showLeds();
-void setAllLeds(uint8_t r, uint8_t g, uint8_t b);
+void setAllLeds(uint8_t r, uint8_t g, uint8_t b, uint8_t w1 = 0, uint8_t w2 = 0);
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
 struct Settings {
@@ -192,17 +192,40 @@ void showLeds() {
 }
 
 // ─── Helper: set every pixel in both buffers to one colour ───────────────────
-void setAllLeds(uint8_t r, uint8_t g, uint8_t b) {
+void setAllLeds(uint8_t r, uint8_t g, uint8_t b, uint8_t w1, uint8_t w2) {
   if (settings.ledType == LED_TYPE_APA102) {
     int total = settings.numOutputs * settings.numLedsPerOutput;
     for (int i = 0; i < total; i++) leds[i] = CRGB(r, g, b);
     controller.showPixels();
   } else {
-    for (int i = 0; i < settings.numOutputs; i++) {
-      for (int j = 0; j < settings.numLedsPerOutput; j++) {
-        strips[i].setPixelColor(j, r, g, b);
+    // WS2812 family: handle RGB, RGBW and RGBWW test outputs
+    if (settings.channelMode == CHANNEL_MODE_RGBWW) {
+      int total = settings.numOutputs * settings.numLedsPerOutput;
+      memset(ledData, 0, sizeof(ledData));
+      for (int i = 0; i < total; i++) {
+        ledData[i * 5 + 0] = r;
+        ledData[i * 5 + 1] = g;
+        ledData[i * 5 + 2] = b;
+        ledData[i * 5 + 3] = w1;
+        ledData[i * 5 + 4] = w2;
       }
-      strips[i].show();
+      driver.showPixels(NO_WAIT, ledData);
+
+    } else if (settings.channelMode == CHANNEL_MODE_RGBW) {
+      for (int i = 0; i < settings.numOutputs; i++) {
+        for (int j = 0; j < settings.numLedsPerOutput; j++) {
+          strips[i].setPixelColor(j, r, g, b, w1);
+        }
+        strips[i].show();
+      }
+
+    } else {
+      for (int i = 0; i < settings.numOutputs; i++) {
+        for (int j = 0; j < settings.numLedsPerOutput; j++) {
+          strips[i].setPixelColor(j, r, g, b);
+        }
+        strips[i].show();
+      }
     }
   }
 }
@@ -636,14 +659,17 @@ void cycleLEDs() {
   if (millis() - state.lastUpdate < CYCLE_DELAY) return;
   state.lastUpdate = millis();
 
-  uint8_t r = 0, g = 0, b = 0;
+  int channels = getChannelsPerLed();
+  uint8_t r = 0, g = 0, b = 0, w1 = 0, w2 = 0;
   switch (state.currentColor) {
-    case 0: r = settings.ledBrightness; break;
-    case 1: g = settings.ledBrightness; break;
-    case 2: b = settings.ledBrightness; break;
+    case 0: r  = settings.ledBrightness; break;
+    case 1: g  = settings.ledBrightness; break;
+    case 2: b  = settings.ledBrightness; break;
+    case 3: if (channels >= 4) w1 = settings.ledBrightness; break;
+    case 4: if (channels >= 5) w2 = settings.ledBrightness; break;
   }
-  state.currentColor = (state.currentColor + 1) % 3;
-  setAllLeds(r, g, b);
+  state.currentColor = (state.currentColor + 1) % channels;
+  setAllLeds(r, g, b, w1, w2);
 }
 
 // ─── Static colour ────────────────────────────────────────────────────────────
