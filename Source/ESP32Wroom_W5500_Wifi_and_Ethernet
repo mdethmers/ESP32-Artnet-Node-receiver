@@ -10,6 +10,10 @@
  *   - Persistent settings in NVS (Preferences)
  *
  * Channel modes: 0 = RGB (3ch), 1 = RGBW (4ch), 2 = RGBWW/CCT (5ch)
+ *
+ * NEW: Random Fade mode — smoothly fades between random colours on all
+ *      active channels (respects RGB / RGBW / RGBWW mode).
+ *      Enable via web UI "Colour Options" section.
  */
 
 // ─── Feature flags ────────────────────────────────────────────────────────────
@@ -79,6 +83,7 @@ void startAPMode();
 void checkBootButton();
 void handleColorSelection();
 void cycleLEDs();
+void randomFadeLEDs();          // NEW
 void setStatusLED(uint8_t r, uint8_t g, uint8_t b);
 void applyStaticColor();
 void loadSettings();
@@ -108,10 +113,11 @@ struct Settings {
   String  ssid              = "";
   String  password          = "";
   bool    useWiFi           = false;
-  String  staticColor       = "#000000";
+  String  staticColor       = "FF8000";
   bool    enStatColor       = false;
   bool    enableCustomPins  = false;
   bool    ledCycleEnabled   = false;
+  bool    randomFadeEnabled = false;   // NEW: smooth random colour fade
   bool    useStaticIP       = false;
   String  staticIP          = "192.168.1.100";
   String  gateway           = "192.168.1.1";
@@ -144,6 +150,19 @@ struct State {
   bool          displayBlink        = false;
 };
 
+// ─── Colour-fade state ────────────────────────────────────────────────────────
+// Cycles sequentially: Red → Green → Blue → White1 (RGBW/WW) → White2 (RGBWW)
+// Each channel fades 0→255 then 255→0 before the next channel takes over.
+// FADE_STEP controls speed: units per tick at FADE_TICK_MS intervals.
+#define FADE_STEP 5   // 1 = slow/smooth (~5 s per colour at 50 Hz); raise for faster
+
+struct FadeState {
+  uint8_t channelIndex = 0;  // outgoing channel (0=R,1=G,2=B,3=W1,4=W2)
+  int     value        = 0;  // crossfade progress: brightness of INCOMING channel (0-255)
+  int     direction    = 1;  // unused, kept for struct stability
+  bool    initialised  = false;
+} fadeState;
+
 // ─── Preset colours ───────────────────────────────────────────────────────────
 const int    PRESET_COLORS_COUNT = 10;
 const String presetColors[PRESET_COLORS_COUNT] = {
@@ -153,6 +172,8 @@ const String presetColors[PRESET_COLORS_COUNT] = {
 };
 
 const unsigned long CYCLE_DELAY = 1000;
+// Fade tick interval — lower = smoother/faster update rate
+const unsigned long FADE_TICK_MS = 20;  // ~50 Hz
 
 // ─── Global objects ───────────────────────────────────────────────────────────
 Adafruit_SSD1306   display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
@@ -271,6 +292,49 @@ int getChannelsPerLed() {
 int getLedsPerUniverse() {
   // How many LEDs fit in one 512-byte ArtNet universe
   return UNIVERSE_SIZE_IN_CHANNEL / getChannelsPerLed();
+}
+
+// ─── Sequential colour fade: tick called from loop() ─────────────────────────
+// Crossfades between channels with no black gap.
+// While the incoming channel rises 0->255, the outgoing channel falls 255->0.
+// Order: R -> G -> B -> W1 (RGBW/WW only) -> W2 (RGBWW only), then repeats.
+// Adjust FADE_STEP at the top of the file to change speed.
+void randomFadeLEDs() {
+  static unsigned long lastTick = 0;
+  unsigned long now = millis();
+  if (now - lastTick < FADE_TICK_MS) return;
+  lastTick = now;
+
+  int numChannels = getChannelsPerLed(); // 3, 4, or 5
+
+  if (!fadeState.initialised) {
+    fadeState.channelIndex = 0;
+    fadeState.value        = 255;  // start: current channel already at full
+    fadeState.direction    = 1;    // direction now means: crossfade in progress
+    fadeState.initialised  = true;
+  }
+
+  // 'value' is the brightness of the INCOMING (next) channel (0->255).
+  // The OUTGOING (current) channel is 255 - value.
+  fadeState.value += FADE_STEP;
+  if (fadeState.value >= 255) {
+    fadeState.value        = 255;
+    // Crossfade complete — incoming becomes the new current channel
+    fadeState.channelIndex = (fadeState.channelIndex + 1) % numChannels;
+    fadeState.value        = 0;   // next crossfade starts fresh
+  }
+
+  int cur  = fadeState.channelIndex;
+  int next = (cur + 1) % numChannels;
+  uint8_t vIn  = (uint8_t)fadeState.value;         // incoming rises
+  uint8_t vOut = (uint8_t)(255 - fadeState.value);  // outgoing falls
+
+  uint8_t ch[5] = {0, 0, 0, 0, 0};
+  ch[cur]  = vOut;
+  ch[next] = vIn;
+
+  setStatusLED(ch[0], ch[1], ch[2]);
+  setAllLeds(ch[0], ch[1], ch[2], ch[3], ch[4]);
 }
 
 // ─── Setup ────────────────────────────────────────────────────────────────────
@@ -431,7 +495,8 @@ void loop() {
   // Standalone LED modes (no network)
   if (settings.networkMode == 3 || settings.networkMode == 4) {
     if (settings.networkMode == 3 && settings.ledCycleEnabled) {
-      cycleLEDs();
+      if (settings.randomFadeEnabled) randomFadeLEDs();
+      else cycleLEDs();
     } else if (settings.networkMode == 4) {
       if (state.colorSelectionMode) {
         handleColorSelection();
@@ -509,7 +574,11 @@ void loop() {
     }
   }
 
-  if (settings.enStatColor && !state.isStaticColorSet) {
+  // ── LED output priority: randomFade > staticColor > ledCycle ─────────────
+  if (settings.randomFadeEnabled) {
+    randomFadeLEDs();
+    state.isStaticColorSet = false;
+  } else if (settings.enStatColor && !state.isStaticColorSet) {
     applyStaticColor();
     state.isStaticColorSet = true;
   } else if (settings.ledCycleEnabled) {
@@ -533,30 +602,29 @@ void updateStripPins() {
 // ─── Load / save settings ─────────────────────────────────────────────────────
 void loadSettings() {
   preferences.begin("esp32config", true);
-  settings.numLedsPerOutput = preferences.getInt("numledsoutput", settings.numLedsPerOutput);
-  settings.numOutputs       = preferences.getInt("numoutput",     settings.numOutputs);
-  settings.startUniverse    = preferences.getInt("startuniverse", settings.startUniverse);
-  settings.nodeName         = preferences.getString("nodename",   settings.nodeName);
-  settings.ledBrightness    = preferences.getInt("ledbrightness", settings.ledBrightness);
-  settings.ssid             = preferences.getString("ssid",       settings.ssid);
-  settings.password         = preferences.getString("password",   settings.password);
-  settings.useWiFi          = preferences.getBool("useWiFi",      settings.useWiFi);
-  settings.staticColor      = preferences.getString("staticColor",settings.staticColor);
-  settings.enStatColor      = preferences.getBool("enStatColor",  settings.enStatColor);
-  settings.enableCustomPins = preferences.getBool("enCustomPins", false);
-  settings.ledCycleEnabled  = preferences.getBool("ledCycleEnabled", false);
-  settings.useStaticIP      = preferences.getBool("useStaticIP",  settings.useStaticIP);
-  settings.staticIP         = preferences.getString("staticIP",   settings.staticIP);
-  settings.gateway          = preferences.getString("gateway",    settings.gateway);
-  settings.subnet           = preferences.getString("subnet",     settings.subnet);
-  settings.networkMode      = preferences.getInt("networkMode",   -1);
-  settings.whiteLevel       = preferences.getInt("whiteLevel",    settings.whiteLevel);
-  settings.white2Level      = preferences.getInt("white2Level",   settings.white2Level);
-  settings.ledType          = preferences.getInt("ledType",       settings.ledType);
+  settings.numLedsPerOutput  = preferences.getInt("numledsoutput",   settings.numLedsPerOutput);
+  settings.numOutputs        = preferences.getInt("numoutput",       settings.numOutputs);
+  settings.startUniverse     = preferences.getInt("startuniverse",   settings.startUniverse);
+  settings.nodeName          = preferences.getString("nodename",     settings.nodeName);
+  settings.ledBrightness     = preferences.getInt("ledbrightness",  settings.ledBrightness);
+  settings.ssid              = preferences.getString("ssid",         settings.ssid);
+  settings.password          = preferences.getString("password",     settings.password);
+  settings.useWiFi           = preferences.getBool("useWiFi",        settings.useWiFi);
+  settings.staticColor       = preferences.getString("staticColor",  settings.staticColor);
+  settings.enStatColor       = preferences.getBool("enStatColor",    settings.enStatColor);
+  settings.enableCustomPins  = preferences.getBool("enCustomPins",   false);
+  settings.ledCycleEnabled   = preferences.getBool("ledCycleEnabled",false);
+  settings.randomFadeEnabled = preferences.getBool("randFadeEn",     false);   // NEW
+  settings.useStaticIP       = preferences.getBool("useStaticIP",    settings.useStaticIP);
+  settings.staticIP          = preferences.getString("staticIP",     settings.staticIP);
+  settings.gateway           = preferences.getString("gateway",      settings.gateway);
+  settings.subnet            = preferences.getString("subnet",       settings.subnet);
+  settings.networkMode       = preferences.getInt("networkMode",     -1);
+  settings.whiteLevel        = preferences.getInt("whiteLevel",      settings.whiteLevel);
+  settings.white2Level       = preferences.getInt("white2Level",     settings.white2Level);
+  settings.ledType           = preferences.getInt("ledType",         settings.ledType);
 
   // ── channelMode migration ─────────────────────────────────────────────────
-  // If a fresh NVS has no "channelMode" key but has the old "useRGBW" bool,
-  // promote it so existing devices keep their configuration on first upgrade.
   if (preferences.isKey("channelMode")) {
     settings.channelMode = preferences.getInt("channelMode", CHANNEL_MODE_RGB);
   } else {
@@ -579,27 +647,28 @@ void loadSettings() {
 
 void saveSettings() {
   preferences.begin("esp32config", false);
-  preferences.putInt("numledsoutput",  settings.numLedsPerOutput);
-  preferences.putInt("numoutput",      settings.numOutputs);
-  preferences.putInt("startuniverse",  settings.startUniverse);
-  preferences.putString("nodename",    settings.nodeName);
-  preferences.putInt("ledbrightness",  settings.ledBrightness);
-  preferences.putString("ssid",        settings.ssid);
-  preferences.putString("password",    settings.password);
-  preferences.putBool("useWiFi",       settings.useWiFi);
-  preferences.putString("staticColor", settings.staticColor);
-  preferences.putBool("enStatColor",   settings.enStatColor);
-  preferences.putBool("enCustomPins",  settings.enableCustomPins);
-  preferences.putBool("ledCycleEnabled", settings.ledCycleEnabled);
-  preferences.putBool("useStaticIP",   settings.useStaticIP);
-  preferences.putString("staticIP",    settings.staticIP);
-  preferences.putString("gateway",     settings.gateway);
-  preferences.putString("subnet",      settings.subnet);
-  preferences.putInt("networkMode",    settings.networkMode);
-  preferences.putInt("channelMode",    settings.channelMode);  // replaces useRGBW
-  preferences.putInt("whiteLevel",     settings.whiteLevel);
-  preferences.putInt("white2Level",    settings.white2Level);
-  preferences.putInt("ledType",        settings.ledType);
+  preferences.putInt("numledsoutput",   settings.numLedsPerOutput);
+  preferences.putInt("numoutput",       settings.numOutputs);
+  preferences.putInt("startuniverse",   settings.startUniverse);
+  preferences.putString("nodename",     settings.nodeName);
+  preferences.putInt("ledbrightness",   settings.ledBrightness);
+  preferences.putString("ssid",         settings.ssid);
+  preferences.putString("password",     settings.password);
+  preferences.putBool("useWiFi",        settings.useWiFi);
+  preferences.putString("staticColor",  settings.staticColor);
+  preferences.putBool("enStatColor",    settings.enStatColor);
+  preferences.putBool("enCustomPins",   settings.enableCustomPins);
+  preferences.putBool("ledCycleEnabled",settings.ledCycleEnabled);
+  preferences.putBool("randFadeEn",     settings.randomFadeEnabled);   // NEW
+  preferences.putBool("useStaticIP",    settings.useStaticIP);
+  preferences.putString("staticIP",     settings.staticIP);
+  preferences.putString("gateway",      settings.gateway);
+  preferences.putString("subnet",       settings.subnet);
+  preferences.putInt("networkMode",     settings.networkMode);
+  preferences.putInt("channelMode",     settings.channelMode);
+  preferences.putInt("whiteLevel",      settings.whiteLevel);
+  preferences.putInt("white2Level",     settings.white2Level);
+  preferences.putInt("ledType",         settings.ledType);
   for (int i = 0; i < NUMSTRIPS; i++) {
     char key[10]; sprintf(key, "pin%d", i);
     preferences.putInt(key, settings.pins[i]);
@@ -683,9 +752,8 @@ void applyStaticColor() {
 
   if (settings.ledType == LED_TYPE_WS2812) {
     if (settings.channelMode == CHANNEL_MODE_RGBWW) {
-      // 5-byte pixels: R G B W1 W2
       int total = settings.numOutputs * settings.numLedsPerOutput;
-      memset(ledData, 0, sizeof(ledData));  // clear first — fixes rogue first-LED white
+      memset(ledData, 0, sizeof(ledData));
       for (int i = 0; i < total; i++) {
         ledData[i * 5 + 0] = r;
         ledData[i * 5 + 1] = g;
@@ -696,21 +764,18 @@ void applyStaticColor() {
       driver.showPixels(NO_WAIT, ledData);
 
     } else if (settings.channelMode == CHANNEL_MODE_RGBW) {
-      // 4-byte pixels: use Adafruit_NeoPixel with the 4-argument setPixelColor
       for (int i = 0; i < settings.numOutputs; i++) {
         for (int j = 0; j < settings.numLedsPerOutput; j++) {
-          strips[i].setPixelColor(j, r, g, b, settings.whiteLevel);  // W channel was missing!
+          strips[i].setPixelColor(j, r, g, b, settings.whiteLevel);
         }
         strips[i].show();
       }
 
     } else {
-      // 3-byte RGB
       setAllLeds(r, g, b);
     }
 
   } else {
-    // APA102 — always RGB
     setAllLeds(r, g, b);
   }
 }
@@ -765,6 +830,12 @@ void checkBootButton() {
           state.displayBlink     = false;
           displayStatus("Static Color Mode", "Color: " + settings.staticColor, "Press button to exit");
         }
+        while (digitalRead(BOOT_BUTTON_PIN) == LOW) delay(10);
+        return;
+      } else if (settings.networkMode == 3) {
+        settings.randomFadeEnabled = !settings.randomFadeEnabled;
+        saveSettings();
+        displayStatus("RGB Test Mode", settings.randomFadeEnabled ? "Random Fade" : "RGB Cycle", "Long press to toggle");
         while (digitalRead(BOOT_BUTTON_PIN) == LOW) delay(10);
         return;
       } else {
@@ -890,6 +961,7 @@ input[type='range']{width:70%;}
 a{color:var(--accent-color);}
 .default-pin{color:var(--muted-text);font-size:.9em;margin-left:5px;}
 .section-divider{border-top:1px solid var(--input-border);margin:15px 0;padding-top:10px;font-weight:bold;text-align:left;}
+.fade-info{font-size:0.85em;color:var(--muted-text);margin:4px 0 8px 0;text-align:left;}
 )";
 
 // ─── JavaScript ───────────────────────────────────────────────────────────────
@@ -908,10 +980,8 @@ function getChannelMode(){
 function updateChannelMode(){
   var cm=getChannelMode();
   var staticColorEnabled=document.getElementById('enStatColor').checked;
-  // White channel 1 — visible for RGBW and RGBWW when static colour is on
   document.getElementById('white-level-container').style.display=
     (cm>=1&&staticColorEnabled)?'block':'none';
-  // White channel 2 — visible for RGBWW only when static colour is on
   document.getElementById('white2-level-container').style.display=
     (cm===2&&staticColorEnabled)?'block':'none';
   updateUniverseSlider();
@@ -939,7 +1009,6 @@ function updateOutputSlider(){
 function updateLedTypeUI(){
   var isAPA102=document.querySelector('input[name="ledType"]:checked').value==='1';
   document.getElementById('apa102-clock-info').style.display=isAPA102?'block':'none';
-  // APA102 is always RGB — hide channel mode selector when APA102 is selected
   document.getElementById('rgbw-container').style.display=isAPA102?'none':'block';
   if(isAPA102){
     document.getElementById('ch0').checked=true;
@@ -998,7 +1067,6 @@ void handleRoot() {
   content += (settings.ledType == LED_TYPE_APA102) ? F("checked") : F("");
   content += F("><label for='apa102'>APA102 / DotStar (SPI)</label></div>");
   content += F("</div>");
-  // Info box shown only for APA102
   content += F("<div id='apa102-clock-info' style='display:");
   content += (settings.ledType == LED_TYPE_APA102) ? F("block") : F("none");
   content += F(";background:var(--input-bg);border-radius:5px;padding:8px;margin:8px 0;font-size:0.9em;text-align:left;'>"
@@ -1007,32 +1075,29 @@ void handleRoot() {
   content += F("</strong>. Data pins are configured below."
                " Channel mode selection is not available for APA102 (always RGB).</div>");
 
-  // ── Channel mode — hidden for APA102 ─────────────────────────────────────
+  // ── Channel mode ──────────────────────────────────────────────────────────
   content += F("<div id='rgbw-container' style='display:");
   content += (settings.ledType == LED_TYPE_APA102) ? F("none") : F("block");
   content += F(";'>");
   content += F("<div class='section-divider'>Channel Mode</div>");
   content += F("<div class='radio-group'>");
 
-  // RGB (3ch)
   content += F("<div class='radio-option'>"
                "<input type='radio' id='ch0' name='channelMode' value='0' onchange='updateChannelMode()' ");
   content += (settings.channelMode == CHANNEL_MODE_RGB) ? F("checked") : F("");
   content += F("><label for='ch0'>RGB (3 ch)</label></div>");
 
-  // RGBW (4ch)
   content += F("<div class='radio-option'>"
                "<input type='radio' id='ch1' name='channelMode' value='1' onchange='updateChannelMode()' ");
   content += (settings.channelMode == CHANNEL_MODE_RGBW) ? F("checked") : F("");
   content += F("><label for='ch1'>RGBW (4 ch)</label></div>");
 
-  // RGBWW / CCT (5ch)
   content += F("<div class='radio-option'>"
                "<input type='radio' id='ch2' name='channelMode' value='2' onchange='updateChannelMode()' ");
   content += (settings.channelMode == CHANNEL_MODE_RGBWW) ? F("checked") : F("");
   content += F("><label for='ch2'>RGBWW / CCT (5 ch)</label></div>");
 
-  content += F("</div></div>"); // close radio-group + rgbw-container
+  content += F("</div></div>");
 
   // ── Universe / LED slider ─────────────────────────────────────────────────
   content += F("<div class='section-divider'>ArtNet Configuration</div>");
@@ -1074,7 +1139,7 @@ void handleRoot() {
   content += String(settings.ledBrightness);
   content += F("</output></span></div>");
 
-  // ── Static colour ────────────────────────────────────────────────────────
+  // ── Colour Options ───────────────────────────────────────────────────────
   content += F("<div class='section-divider'>Colour Options</div>");
   content += F("<label for='staticColor'>Static RGB Colour:</label>"
                "<input type='color' id='staticColor' name='staticColor' value='");
@@ -1116,6 +1181,11 @@ void handleRoot() {
   content += F("<label for='ledCycleEnabled'>Enable RGB Test Cycle:</label>"
                "<input type='checkbox' id='ledCycleEnabled' name='ledCycleEnabled' ");
   content += settings.ledCycleEnabled ? F("checked") : F(""); content += F("><br>");
+
+  // ── Colour Fade (sequential) ──────────────────────────────────────────────
+  content += F("<label for='randomFadeEnabled'>Enable Colour Fade Cycle:</label>"
+               "<input type='checkbox' id='randomFadeEnabled' name='randomFadeEnabled' ");
+  content += settings.randomFadeEnabled ? F("checked") : F(""); content += F("><br>");
 
   // ── Custom pins ───────────────────────────────────────────────────────────
   content += F("<div class='section-divider'>Pin Configuration</div>");
@@ -1195,22 +1265,22 @@ void handleConfig() {
 
   // Channel mode (only meaningful for WS2812)
   if (settings.ledType == LED_TYPE_APA102) {
-    settings.channelMode = CHANNEL_MODE_RGB; // APA102 is always RGB
+    settings.channelMode = CHANNEL_MODE_RGB;
   } else if (server.hasArg("channelMode")) {
     int newMode = server.arg("channelMode").toInt();
     if (newMode < CHANNEL_MODE_RGB || newMode > CHANNEL_MODE_RGBWW) newMode = CHANNEL_MODE_RGB;
     if (settings.channelMode != newMode) {
       settings.channelMode = newMode;
-      // Clamp LED count to new maximum
       int maxLeds = getMaxLedsPerStrip();
       if (settings.numLedsPerOutput > maxLeds) settings.numLedsPerOutput = maxLeds;
     }
   }
 
-  settings.useWiFi         = server.hasArg("useWiFi");
-  settings.enStatColor      = server.hasArg("enStatColor");
-  settings.ledCycleEnabled  = server.hasArg("ledCycleEnabled");
-  settings.networkMode      = settings.useWiFi ? 1 : 0;
+  settings.useWiFi          = server.hasArg("useWiFi");
+  settings.enStatColor       = server.hasArg("enStatColor");
+  settings.ledCycleEnabled   = server.hasArg("ledCycleEnabled");
+  settings.randomFadeEnabled = server.hasArg("randomFadeEnabled");   // NEW
+  settings.networkMode       = settings.useWiFi ? 1 : 0;
 
   bool wasCustom = settings.enableCustomPins;
   settings.enableCustomPins = server.hasArg("enableCustomPins");
@@ -1231,10 +1301,16 @@ void handleConfig() {
     }
   }
 
-  // Resolve LED mode conflicts
-  if (settings.ledCycleEnabled && settings.enStatColor) {
-    settings.ledCycleEnabled = false; // static colour wins
+  // Priority resolution: randomFade wins, then staticColor, then cycle
+  if (settings.randomFadeEnabled) {
+    settings.enStatColor     = false;
+    settings.ledCycleEnabled = false;
+  } else if (settings.ledCycleEnabled && settings.enStatColor) {
+    settings.ledCycleEnabled = false; // static colour wins over cycle
   }
+
+  // Reset fade state so it re-initialises with fresh RNG on next boot
+  fadeState.initialised = false;
 
   state.isStaticColorSet = false;
   saveSettings();
