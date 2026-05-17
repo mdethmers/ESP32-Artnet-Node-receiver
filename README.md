@@ -55,7 +55,7 @@ EasyEDA Editor: https://easyeda.com/editor#project_id=86fd5b1121594bfa85fd2c5eed
   - **Preferences** https://www.arduino.cc/reference/en/libraries/preferences/
   - **WebServer_ESP32_W5500** https://github.com/khoih-prog/WebServer_ESP32_W5500
   - **I2SClocklessLedDriver** https://github.com/hpwit/I2SClocklessLedDriver
-  - **artnetESP32V2** https://github.com/hpwit/artnetesp32v2
+  - **FORKED artnetESP32V2** https://github.com/mdethmers/artnetesp32v2
   - WebServer.h (For Wi-Fi and web interface support)
   - Adafruit_NeoPixel.h (For addressable LED control)
   - SPI.h, Wire.h (Built-in libraries for communication)
