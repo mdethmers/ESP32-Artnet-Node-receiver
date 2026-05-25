@@ -127,6 +127,7 @@ struct Settings {
   int     whiteLevel        = 0;
   int     white2Level       = 0;   // second white channel for RGBWW static colour
   int     ledType           = LED_TYPE_WS2812; // 0=WS2812, 1=APA102
+  int     protocolMode       = PROTOCOL_BOTH;  // 0=ArtNet, 1=sACN, 2=Both
 
   // Convenience helpers -------------------------------------------------------
   bool isRGBW()   const { return channelMode == CHANNEL_MODE_RGBW;  }
@@ -465,9 +466,11 @@ void setup() {
     String ipStr = activeIP.toString();
     int lpuv = getLedsPerUniverse();
     int universesPerOutput = (settings.numLedsPerOutput + lpuv - 1) / lpuv;
+    String protoStr = (settings.protocolMode == PROTOCOL_ARTNET) ? "AN" :
+                    (settings.protocolMode == PROTOCOL_SACN)   ? "sACN" : "AN+sACN";
     String ledsInfo = "LED:" + String(settings.numLedsPerOutput) +
                       " Uni:" + String(universesPerOutput) +
-                      " Out:" + String(settings.numOutputs);
+                      " " + protoStr;
     displayStatus(settings.nodeName, ipStr, ledsInfo);
 
     int universeSize   = lpuv * getChannelsPerLed();
@@ -481,9 +484,30 @@ void setup() {
     );
     artnet.setNodeName(settings.nodeName);
 
-    if (artnet.listen(activeIP, 6454)) {
-      Serial.print("Artnet Listening on IP: ");
-      Serial.println(activeIP);
+    artnet.protocolMode = settings.protocolMode;
+
+  // Port 6454 is only used when ArtNet is active; sACN always uses 5568
+  // internally. We pass 6454 as the ArtNet port regardless — the library
+  // ignores it when protocolMode == PROTOCOL_SACN.
+  bool listenOk = artnet.listen(activeIP, 6454);
+
+  if (listenOk) {
+    switch (settings.protocolMode) {
+      case PROTOCOL_ARTNET: Serial.println("Listening — ArtNet port 6454");          break;
+      case PROTOCOL_SACN:   Serial.println("Listening — sACN (E1.31) port 5568");    break;
+      default:              Serial.println("Listening — ArtNet 6454 + sACN 5568");   break;
+    }
+  } else {
+    Serial.println("ERROR: artnet.listen() failed");
+  }
+
+    // Optional: join sACN multicast groups (needed for multicast sACN sources
+    // such as some lighting consoles). Unicast sACN works without this.
+    if (settings.protocolMode != PROTOCOL_ARTNET) {
+      int lpuv              = getLedsPerUniverse();
+      int universesPerOutput = (settings.numLedsPerOutput + lpuv - 1) / lpuv;
+      artnet.joinSACNMulticast(settings.startUniverse,
+                               universesPerOutput * settings.numOutputs);
     }
   }
 }
@@ -623,6 +647,8 @@ void loadSettings() {
   settings.whiteLevel        = preferences.getInt("whiteLevel",      settings.whiteLevel);
   settings.white2Level       = preferences.getInt("white2Level",     settings.white2Level);
   settings.ledType           = preferences.getInt("ledType",         settings.ledType);
+  settings.protocolMode      = preferences.getInt("protocolMode",    PROTOCOL_BOTH);
+
 
   // ── channelMode migration ─────────────────────────────────────────────────
   if (preferences.isKey("channelMode")) {
@@ -669,6 +695,8 @@ void saveSettings() {
   preferences.putInt("whiteLevel",      settings.whiteLevel);
   preferences.putInt("white2Level",     settings.white2Level);
   preferences.putInt("ledType",         settings.ledType);
+  preferences.putInt("protocolMode",    settings.protocolMode);
+
   for (int i = 0; i < NUMSTRIPS; i++) {
     char key[10]; sprintf(key, "pin%d", i);
     preferences.putInt(key, settings.pins[i]);
@@ -1022,8 +1050,29 @@ function toggleDarkMode(){
   localStorage.setItem('darkMode',isDark?'enabled':'disabled');
   document.getElementById('darkModeBtn').textContent=isDark?'Light Mode':'Dark Mode';
 }
+function updateUniverseHint(){
+  var sel=document.querySelector('input[name="protocolMode"]:checked');
+  var isSACN=sel && sel.value==='1';
+  var hidden=document.getElementById('startuniverse');
+  var display=document.getElementById('startuniverse_display');
+  // Display field shows +1 for sACN, raw value for ArtNet
+  display.value=isSACN ? (parseInt(hidden.value)+1) : parseInt(hidden.value);
+  document.getElementById('universe-hint').textContent=
+    isSACN ? 'sACN universe (1-based). Universe 1 = first universe.' :
+              'ArtNet universe (0-based). Universe 0 = first universe.';
+}
+function syncUniverseInput(){
+  var sel=document.querySelector('input[name="protocolMode"]:checked');
+  var isSACN=sel && sel.value==='1';
+  var hidden=document.getElementById('startuniverse');
+  var display=document.getElementById('startuniverse_display');
+  // User typed in display field — store raw 0-based value in hidden field
+  hidden.value=isSACN ? Math.max(0,parseInt(display.value)-1) : parseInt(display.value);
+}
+
 window.onload=function(){
   togglePinInputs();
+  updateUniverseHint()
   toggleStaticIP();
   updateChannelMode();
   updateUniverseSlider();
@@ -1099,6 +1148,22 @@ void handleRoot() {
 
   content += F("</div></div>");
 
+  content += F("<div class='section-divider'>Protocol</div>");
+  content += F("<div class='radio-group'>");
+  content += F("<div class='radio-option'>"
+               "<input type='radio' name='protocolMode' value='0' onchange='updateUniverseHint()'");
+  content += (settings.protocolMode == PROTOCOL_ARTNET) ? F("checked") : F("");
+  content += F("><label>ArtNet</label></div>");
+  content += F("<div class='radio-option'>"
+               "<input type='radio' name='protocolMode' value='1' onchange='updateUniverseHint()'");
+  content += (settings.protocolMode == PROTOCOL_SACN) ? F("checked") : F("");
+  content += F("><label>sACN (E1.31)</label></div>");
+  content += F("<div class='radio-option'>"
+               "<input type='radio' name='protocolMode' value='2' onchange='updateUniverseHint()'");
+  content += (settings.protocolMode == PROTOCOL_BOTH) ? F("checked") : F("");
+  content += F("><label>ArtNet + sACN</label></div>");
+  content += F("</div>");
+
   // ── Universe / LED slider ─────────────────────────────────────────────────
   content += F("<div class='section-divider'>ArtNet Configuration</div>");
   int lpuv             = getLedsPerUniverse();
@@ -1125,9 +1190,17 @@ void handleRoot() {
   content += String(settings.numOutputs);
   content += F("'></div>");
 
-  content += F("<label for='startuniverse'>Start universe:</label>"
-               "<input type='text' id='startuniverse' name='startuniverse' value='");
-  content += String(settings.startUniverse); content += F("'><br>");
+  int displayUniverse = (settings.protocolMode == PROTOCOL_SACN)
+                      ? settings.startUniverse + 1
+                      : settings.startUniverse;
+  content += F("<label for='startuniverse_display'>Start universe:</label>"
+              "<input type='text' id='startuniverse_display' value='");
+  content += String(displayUniverse);
+  content += F("' oninput='syncUniverseInput()'>"
+              "<input type='hidden' id='startuniverse' name='startuniverse' value='");
+  content += String(settings.startUniverse);
+  content += F("'><br>");
+  content += F("<div class='fade-info' id='universe-hint'></div>");
 
   // ── Brightness ───────────────────────────────────────────────────────────
   content += F("<div class='slider-container'>"
@@ -1247,10 +1320,10 @@ void handleRoot() {
 // ─── Config POST handler ──────────────────────────────────────────────────────
 void handleConfig() {
   if (server.method() != HTTP_POST) return;
-
+  if (server.hasArg("protocolMode"))  settings.protocolMode     = server.arg("protocolMode").toInt();
   if (server.hasArg("numledsoutput")) settings.numLedsPerOutput = server.arg("numledsoutput").toInt();
   if (server.hasArg("numoutput"))     settings.numOutputs       = server.arg("numoutput").toInt();
-  if (server.hasArg("startuniverse")) settings.startUniverse    = server.arg("startuniverse").toInt();
+  if (server.hasArg("startuniverse"))  settings.startUniverse   = server.arg("startuniverse").toInt();
   if (server.hasArg("nodename"))      settings.nodeName         = server.arg("nodename");
   if (server.hasArg("ledbrightness")) settings.ledBrightness    = server.arg("ledbrightness").toInt();
   if (server.hasArg("ssid"))          settings.ssid             = server.arg("ssid");
