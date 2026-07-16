@@ -46,7 +46,7 @@ EasyEDA Editor: https://easyeda.com/editor#project_id=86fd5b1121594bfa85fd2c5eed
 **Important!** Only a few ESP32's are supported! Check the WebServer_ESP32_W5500 for supported Boards when using the W5500.
 
 ## Node Pinout
-![Image Description](https://github.com/mdethmers/ESP32-Artnet-Node-receiver/blob/main/Img/wiring small.png)
+![Image Description](https://github.com/mdethmers/ESP32-Artnet-Node-receiver/blob/main/Img/wiring%20small.png)
   
 ## Software Requirements
 
