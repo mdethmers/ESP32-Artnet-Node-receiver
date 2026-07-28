@@ -138,10 +138,20 @@ Important! Be sure that the Universes/outputs/leds always match what you output.
 - Default led strip pins are 12, 14, 27, 26 (more outputs can be added if necessary. Change config accordingly).
 - Default status led is set to pin 16.
 - SPI-based LED clock line can run from Pin 17. Never versions of the board have this pin connected in the connector. 
+- Level shifter OE is set to pin 25 and should be set LOW
 - Pin 16/17 can be reprogrammed for new functionality/adding more outputs. (They are connected to the 5v level shifter). 
 - I2C pins for OLED are set to pins 21 and 22.
 - The default timeout is set to 30 seconds.
-- There is a 5V switch Where the 12v regulator sits. Use this if you power the node with 5V instead of 12V! The esp and other logic will be powered from the 5v power supply instead of the 12v to 5v regulator. 
+- There is a 5V switch Where the 12v regulator sits. Use this if you power the node with 5V instead of 12V! The esp and other logic will be powered from the 5v power supply instead of the 12v to 5v regulator.
+
+To enable outputs, the level shifter should have its OE set to low. OE is connected to IO25, and can be set during setup like this; 
+```
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(ShifterPin, OUTPUT);
+  digitalWrite(ShifterPin, LOW);
+```
 
 ### A note on direct Ethernet connection between Node and PC
 Sadly, the W5500 does not support Auto-MDI/MDIX, which means you need a crossover cable whenever you want to connect directly from your PC to the Node with an Ethernet cable!
