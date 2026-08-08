@@ -136,6 +136,16 @@ struct Settings {
   bool useRGBW_compat() const { return channelMode != CHANNEL_MODE_RGB; }
 };
 
+// ─── Resolved static network config ───────────────────────────────────────────
+// Declared here (not next to resolveStaticConfig) because Arduino hoists
+// generated prototypes above the first function definition in the sketch.
+struct NetConfig {
+  bool      valid = false;   // true when a usable static address was resolved
+  IPAddress ip;
+  IPAddress gateway;
+  IPAddress subnet;
+};
+
 // ─── Runtime state ────────────────────────────────────────────────────────────
 struct State {
   bool          isAPMode            = false;
@@ -892,12 +902,79 @@ void checkBootButton() {
   }
 }
 
+// ─── Static IP resolution ─────────────────────────────────────────────────────
+// Only the IP itself is mandatory. A blank or malformed subnet is filled in
+// from the address class, and a blank gateway means "no default route", which
+// is normal on an isolated lighting network.
+
+// A netmask must be a contiguous run of 1-bits. /0 and /32 are unusable here.
+static bool isValidSubnet(IPAddress sn) {
+  uint32_t m = ((uint32_t)sn[0] << 24) | ((uint32_t)sn[1] << 16) |
+               ((uint32_t)sn[2] <<  8) |  (uint32_t)sn[3];
+  if (m == 0 || m == 0xFFFFFFFFUL) return false;
+  uint32_t inv = ~m;
+  return (inv & (inv + 1)) == 0;
+}
+
+// ArtNet networks conventionally sit on 2.x.x.x / 10.x.x.x with a /8 mask.
+static IPAddress defaultSubnetFor(IPAddress ip) {
+  if (ip[0] == 2 || ip[0] == 10) return IPAddress(255, 0, 0, 0);
+  return IPAddress(255, 255, 255, 0);
+}
+
+static bool sameSubnet(IPAddress a, IPAddress b, IPAddress mask) {
+  for (int i = 0; i < 4; i++)
+    if ((a[i] & mask[i]) != (b[i] & mask[i])) return false;
+  return true;
+}
+
+// ArtNet fallback address derived from the MAC (2.B.C.D, /8), used when DHCP
+// never answers so the node stays reachable. The address is shown on the OLED.
+static IPAddress artnetFallbackIP() {
+  uint8_t mac[6] = {0};
+  ETH.macAddress(mac);
+  return IPAddress(2, mac[3], mac[4], mac[5]);
+}
+
+NetConfig resolveStaticConfig() {
+  NetConfig cfg;
+  String ipStr = settings.staticIP; ipStr.trim();
+  String gwStr = settings.gateway;  gwStr.trim();
+  String snStr = settings.subnet;   snStr.trim();
+
+  if (!cfg.ip.fromString(ipStr) || (uint32_t)cfg.ip == 0) {
+    Serial.println("Static IP is blank or malformed — using DHCP instead");
+    return cfg;
+  }
+
+  if (!cfg.subnet.fromString(snStr) || !isValidSubnet(cfg.subnet)) {
+    cfg.subnet = defaultSubnetFor(cfg.ip);
+    Serial.println("Subnet blank or invalid — defaulting to " + cfg.subnet.toString());
+  }
+
+  if (!cfg.gateway.fromString(gwStr)) cfg.gateway = IPAddress(0, 0, 0, 0);
+
+  // A gateway outside our own subnet is unreachable — better no default route
+  // than a broken one that black-holes traffic.
+  if ((uint32_t)cfg.gateway != 0 && !sameSubnet(cfg.ip, cfg.gateway, cfg.subnet)) {
+    Serial.println("Gateway " + cfg.gateway.toString() + " is outside the subnet — ignoring it");
+    cfg.gateway = IPAddress(0, 0, 0, 0);
+  }
+
+  cfg.valid = true;
+  return cfg;
+}
+
 // ─── WiFi setup ───────────────────────────────────────────────────────────────
 void setupWiFi() {
   if (settings.useStaticIP) {
-    IPAddress ip, gw, sn;
-    if (ip.fromString(settings.staticIP) && gw.fromString(settings.gateway) && sn.fromString(settings.subnet))
-      WiFi.config(ip, gw, sn);
+    NetConfig net = resolveStaticConfig();
+    if (net.valid) {
+      if (!WiFi.config(net.ip, net.gateway, net.subnet))
+        Serial.println("WiFi.config() rejected the static address — using DHCP");
+    } else {
+      displayStatus("Static IP invalid", "Falling back to DHCP");
+    }
   }
   WiFi.begin(settings.ssid.c_str(), settings.password.c_str());
   displayStatus("Connecting to Wi-Fi...");
@@ -922,17 +999,39 @@ void setupEthernet() {
   displayStatus("Initializing Ethernet");
   ESP32_W5500_onEvent();
   ETH.begin(MISO_GPIO, MOSI_GPIO, SCK_GPIO, CS_GPIO, INT_GPIO, SPI_CLOCK_MHZ, ETH_SPI_HOST);
+  bool staticApplied = false;
   if (settings.useStaticIP) {
-    IPAddress ip, gw, sn;
-    if (ip.fromString(settings.staticIP) && gw.fromString(settings.gateway) && sn.fromString(settings.subnet))
-      ETH.config(ip, gw, sn);
+    NetConfig net = resolveStaticConfig();
+    if (net.valid) {
+      staticApplied = ETH.config(net.ip, net.gateway, net.subnet);
+      if (!staticApplied)
+        Serial.println("ETH.config() rejected the static address — using DHCP");
+    } else {
+      displayStatus("Static IP invalid", "Falling back to DHCP");
+    }
   }
+
+  // Without a static address we wait for a lease, but not forever: a network
+  // with no DHCP server would otherwise hang setup() here, leaving the node
+  // with no web server and no ArtNet.
+  const unsigned long DHCP_TIMEOUT_MS = 30000;
+  unsigned long       waitStart       = millis();
+  bool                usedFallback    = false;
+
   while (ETH.localIP() == INADDR_NONE) {
     checkBootButton();
     state.ledState = !state.ledState;
     setStatusLED(state.ledState ? 255 : 0, 0, 0);
     displayConnectionStatus("Ethernet");
     delay(500);
+
+    if (!staticApplied && !usedFallback && millis() - waitStart > DHCP_TIMEOUT_MS) {
+      usedFallback = true;
+      IPAddress fb = artnetFallbackIP();
+      Serial.println("No DHCP lease after 30 s — falling back to " + fb.toString());
+      displayStatus("No DHCP server", "Fallback IP", fb.toString());
+      ETH.config(fb, IPAddress(0, 0, 0, 0), IPAddress(255, 0, 0, 0));
+    }
   }
   server.on("/", HTTP_GET, handleRoot);
   server.on("/config", HTTP_POST, handleConfig);
@@ -1293,9 +1392,12 @@ void handleRoot() {
   content += F("<label>Static IP:</label><input type='text' name='staticIP' value='");
   content += settings.staticIP; content += F("' placeholder='192.168.1.100'><br>");
   content += F("<label>Gateway:</label><input type='text' name='gateway' value='");
-  content += settings.gateway; content += F("' placeholder='192.168.1.1'><br>");
+  content += settings.gateway; content += F("' placeholder='optional'><br>");
   content += F("<label>Subnet:</label><input type='text' name='subnet' value='");
-  content += settings.subnet; content += F("' placeholder='255.255.255.0'><br></div>");
+  content += settings.subnet; content += F("' placeholder='optional'><br>");
+  content += F("<div class='fade-info'>Only the IP is required. Leave Subnet blank for an "
+               "automatic mask, and Gateway blank if the node stays on the local "
+               "network.</div></div>");
 
   content += F("<label for='useWiFi'>Use Wi-Fi:</label>"
                "<input type='checkbox' id='useWiFi' name='useWiFi' ");
@@ -1358,9 +1460,22 @@ void handleConfig() {
   bool wasCustom = settings.enableCustomPins;
   settings.enableCustomPins = server.hasArg("enableCustomPins");
   settings.useStaticIP      = server.hasArg("useStaticIP");
-  if (server.hasArg("staticIP")) settings.staticIP = server.arg("staticIP");
-  if (server.hasArg("gateway"))  settings.gateway  = server.arg("gateway");
-  if (server.hasArg("subnet"))   settings.subnet   = server.arg("subnet");
+  if (server.hasArg("staticIP")) { settings.staticIP = server.arg("staticIP"); settings.staticIP.trim(); }
+  if (server.hasArg("gateway"))  { settings.gateway  = server.arg("gateway");  settings.gateway.trim();  }
+  if (server.hasArg("subnet"))   { settings.subnet   = server.arg("subnet");   settings.subnet.trim();   }
+
+  // Normalise before saving so what lands in NVS is what the node will
+  // actually use, and the config page shows the resolved values back.
+  if (settings.useStaticIP) {
+    NetConfig net = resolveStaticConfig();
+    if (net.valid) {
+      settings.staticIP = net.ip.toString();
+      settings.subnet   = net.subnet.toString();
+      settings.gateway  = ((uint32_t)net.gateway != 0) ? net.gateway.toString() : "";
+    } else {
+      settings.useStaticIP = false;   // unusable address — don't strand the node
+    }
+  }
 
   bool pinsChanged = false;
   if (wasCustom && !settings.enableCustomPins) { resetToDefaultPins(); pinsChanged = true; }
