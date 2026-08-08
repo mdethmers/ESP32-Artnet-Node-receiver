@@ -1041,14 +1041,6 @@ static bool sameSubnet(IPAddress a, IPAddress b, IPAddress mask) {
   return true;
 }
 
-// ArtNet fallback address derived from the MAC (2.B.C.D, /8), used when DHCP
-// never answers so the node stays reachable. The address is shown on the OLED.
-static IPAddress artnetFallbackIP() {
-  uint8_t mac[6] = {0};
-  ETH.macAddress(mac);
-  return IPAddress(2, mac[3], mac[4], mac[5]);
-}
-
 NetConfig resolveStaticConfig() {
   NetConfig cfg;
   String ipStr = settings.staticIP; ipStr.trim();
@@ -1112,39 +1104,25 @@ void setupEthernet() {
   displayStatus("Initializing Ethernet");
   ESP32_W5500_onEvent();
   ETH.begin(MISO_GPIO, MOSI_GPIO, SCK_GPIO, CS_GPIO, INT_GPIO, SPI_CLOCK_MHZ, ETH_SPI_HOST);
-  bool staticApplied = false;
   if (settings.useStaticIP) {
     NetConfig net = resolveStaticConfig();
     if (net.valid) {
-      staticApplied = ETH.config(net.ip, net.gateway, net.subnet);
-      if (!staticApplied)
+      if (!ETH.config(net.ip, net.gateway, net.subnet))
         Serial.println("ETH.config() rejected the static address — using DHCP");
     } else {
       displayStatus("Static IP invalid", "Falling back to DHCP");
     }
   }
 
-  // Without a static address we wait for a lease, but not forever: a network
-  // with no DHCP server would otherwise hang setup() here, leaving the node
-  // with no web server and no ArtNet.
-  const unsigned long DHCP_TIMEOUT_MS = 30000;
-  unsigned long       waitStart       = millis();
-  bool                usedFallback    = false;
-
+  // A static address is live immediately, so this only spins in DHCP mode.
+  // Waiting indefinitely is deliberate: the node comes up whenever the network
+  // does, rather than inventing an address of its own.
   while (ETH.localIP() == INADDR_NONE) {
     checkBootButton();
     state.ledState = !state.ledState;
     setStatusLED(state.ledState ? 255 : 0, 0, 0);
     displayConnectionStatus("Ethernet");
     delay(500);
-
-    if (!staticApplied && !usedFallback && millis() - waitStart > DHCP_TIMEOUT_MS) {
-      usedFallback = true;
-      IPAddress fb = artnetFallbackIP();
-      Serial.println("No DHCP lease after 30 s — falling back to " + fb.toString());
-      displayStatus("No DHCP server", "Fallback IP", fb.toString());
-      ETH.config(fb, IPAddress(0, 0, 0, 0), IPAddress(255, 0, 0, 0));
-    }
   }
   server.on("/", HTTP_GET, handleRoot);
   server.on("/config", HTTP_POST, handleConfig);
