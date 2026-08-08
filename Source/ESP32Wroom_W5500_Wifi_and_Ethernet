@@ -146,6 +146,21 @@ struct NetConfig {
   IPAddress subnet;
 };
 
+// ─── Discovered ArtNet nodes ──────────────────────────────────────────────────
+// Filled in from ArtPollReply packets. Written from the lwIP receive context
+// and read while rendering the config page, so access is spinlock-guarded.
+#define MAX_DISCOVERED_NODES   32
+#define NODE_EXPIRY_MS         15000UL   // drop a node after ~3 missed polls
+#define ARTPOLL_INTERVAL_MS     4000UL
+#define ARTPOLLREPLY_NAME_OFF   26       // short_name[18] offset in the reply
+
+struct DiscoveredNode {
+  uint32_t      ip       = 0;     // IPv4, network byte order
+  char          name[18] = {0};   // ArtPollReply short_name
+  unsigned long lastSeen = 0;
+  bool          used     = false;
+};
+
 // ─── Runtime state ────────────────────────────────────────────────────────────
 struct State {
   bool          isAPMode            = false;
@@ -205,6 +220,9 @@ CRGB      leds[NUMSTRIPS * MAX_LEDS_RGB];      // FastLED CRGB array for APA102
 Settings settings;
 State    state;
 
+DiscoveredNode discoveredNodes[MAX_DISCOVERED_NODES];
+portMUX_TYPE   nodeTableMux = portMUX_INITIALIZER_UNLOCKED;
+
 // NeoPixel strip objects (used for static/test colour output only)
 Adafruit_NeoPixel strips[NUMSTRIPS] = {
   Adafruit_NeoPixel(MAX_LEDS_RGB, DEFAULT_PINS[0], NEO_BRG + NEO_KHZ800),
@@ -212,6 +230,91 @@ Adafruit_NeoPixel strips[NUMSTRIPS] = {
   Adafruit_NeoPixel(MAX_LEDS_RGB, DEFAULT_PINS[2], NEO_BRG + NEO_KHZ800),
   Adafruit_NeoPixel(MAX_LEDS_RGB, DEFAULT_PINS[3], NEO_BRG + NEO_KHZ800)
 };
+
+// ─── Node discovery ───────────────────────────────────────────────────────────
+// Runs on the lwIP tcpip task for every ArtPollReply on the wire. Must stay
+// short: no Serial, no allocation, no blocking calls.
+void onArtPollReply(const uint8_t *pkt, uint16_t len, uint32_t srcIp) {
+  if (srcIp == 0) return;
+
+  portENTER_CRITICAL(&nodeTableMux);
+
+  int slot = -1;
+  for (int i = 0; i < MAX_DISCOVERED_NODES; i++)
+    if (discoveredNodes[i].used && discoveredNodes[i].ip == srcIp) { slot = i; break; }
+
+  if (slot < 0)
+    for (int i = 0; i < MAX_DISCOVERED_NODES; i++)
+      if (!discoveredNodes[i].used) { slot = i; break; }
+
+  if (slot < 0) {
+    // Table full — reuse whichever entry we have not heard from longest
+    unsigned long oldest = discoveredNodes[0].lastSeen;
+    slot = 0;
+    for (int i = 1; i < MAX_DISCOVERED_NODES; i++)
+      if (discoveredNodes[i].lastSeen < oldest) { oldest = discoveredNodes[i].lastSeen; slot = i; }
+  }
+
+  discoveredNodes[slot].ip       = srcIp;
+  discoveredNodes[slot].used     = true;
+  discoveredNodes[slot].lastSeen = millis();
+  memcpy(discoveredNodes[slot].name, pkt + ARTPOLLREPLY_NAME_OFF, 17);
+  discoveredNodes[slot].name[17] = '\0';
+
+  portEXIT_CRITICAL(&nodeTableMux);
+}
+
+// Copy the live entries out so the page can be rendered without holding the
+// lock. Expired entries are freed on the way past.
+int snapshotNodes(DiscoveredNode *out, int maxOut) {
+  unsigned long now = millis();
+  int n = 0;
+
+  portENTER_CRITICAL(&nodeTableMux);
+  for (int i = 0; i < MAX_DISCOVERED_NODES && n < maxOut; i++) {
+    if (!discoveredNodes[i].used) continue;
+    if (now - discoveredNodes[i].lastSeen > NODE_EXPIRY_MS) {
+      discoveredNodes[i].used = false;
+      continue;
+    }
+    out[n++] = discoveredNodes[i];
+  }
+  portEXIT_CRITICAL(&nodeTableMux);
+
+  return n;
+}
+
+// Sort by dotted-quad order. The stored address is network byte order, so it
+// has to be byte-swapped before comparing numerically on this little-endian MCU.
+void sortNodesByIP(DiscoveredNode *list, int count) {
+  for (int i = 1; i < count; i++) {
+    DiscoveredNode key = list[i];
+    int j = i - 1;
+    while (j >= 0 && __builtin_bswap32(list[j].ip) > __builtin_bswap32(key.ip)) {
+      list[j + 1] = list[j];
+      j--;
+    }
+    list[j + 1] = key;
+  }
+}
+
+// Node names arrive over the network, so they are escaped before going into
+// the page. Non-printable bytes are dropped rather than rendered.
+String htmlEscape(const char *s) {
+  String out;
+  for (const char *p = s; *p; p++) {
+    if (*p < 32 || *p > 126) continue;
+    switch (*p) {
+      case '&':  out += F("&amp;");  break;
+      case '<':  out += F("&lt;");   break;
+      case '>':  out += F("&gt;");   break;
+      case '"':  out += F("&quot;"); break;
+      case '\'': out += F("&#39;");  break;
+      default:   out += *p;          break;
+    }
+  }
+  return out;
+}
 
 // ─── Helper: show whatever driver is active ───────────────────────────────────
 void showLeds() {
@@ -493,6 +596,7 @@ void setup() {
       &displayfunction
     );
     artnet.setNodeName(settings.nodeName);
+    artnet.setPollReplyCallback(onArtPollReply);
 
     artnet.protocolMode = settings.protocolMode;
 
@@ -605,6 +709,15 @@ void loop() {
         }
       }
       lastConnectionState = currentlyConnected;
+    }
+  }
+
+  // ── Node discovery: ask who else is out there every few seconds ──────────
+  if (!state.isAPMode && (settings.networkMode == 0 || settings.networkMode == 1)) {
+    static unsigned long lastPoll = 0;
+    if (millis() - lastPoll >= ARTPOLL_INTERVAL_MS) {
+      lastPoll = millis();
+      artnet.sendArtPoll();
     }
   }
 
@@ -1089,6 +1202,9 @@ a{color:var(--accent-color);}
 .default-pin{color:var(--muted-text);font-size:.9em;margin-left:5px;}
 .section-divider{border-top:1px solid var(--input-border);margin:15px 0;padding-top:10px;font-weight:bold;text-align:left;}
 .fade-info{font-size:0.85em;color:var(--muted-text);margin:4px 0 8px 0;text-align:left;}
+.node-picker{background-color:var(--form-bg);padding:15px 20px;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,.1);max-width:400px;margin:0 auto 20px auto;text-align:left;}
+.node-picker label{font-weight:bold;}
+.node-picker select{width:100%;padding:10px;margin:8px 0 4px 0;border:1px solid var(--input-border);border-radius:4px;font-size:16px;background-color:var(--input-bg);color:var(--text-color);}
 )";
 
 // ─── JavaScript ───────────────────────────────────────────────────────────────
@@ -1143,6 +1259,9 @@ function updateLedTypeUI(){
     document.getElementById('white2-level-container').style.display='none';
   }
 }
+function gotoNode(sel){
+  if(sel.value){ location.href='http://'+sel.value+'/'; }
+}
 function toggleDarkMode(){
   document.body.classList.toggle('dark-mode');
   var isDark=document.body.classList.contains('dark-mode');
@@ -1195,7 +1314,58 @@ void handleRoot() {
   content += JS_CODE;
   content += F("</script></head><body>");
   content += F("<button id='darkModeBtn' class='dark-mode-toggle' onclick='toggleDarkMode()'>Dark Mode</button>");
-  content += F("<h1>"); content += settings.nodeName; content += F(" Configuration</h1>");
+  content += F("<h1>"); content += htmlEscape(settings.nodeName.c_str()); content += F(" Configuration</h1>");
+
+  // ── Node picker ───────────────────────────────────────────────────────────
+  // Sits outside the form so the selection is never submitted with the config.
+  {
+    DiscoveredNode nodes[MAX_DISCOVERED_NODES];
+    int       count  = snapshotNodes(nodes, MAX_DISCOVERED_NODES);
+    sortNodesByIP(nodes, count);
+
+    IPAddress selfIP = state.isAPMode          ? WiFi.softAPIP()
+                     : (settings.networkMode == 1) ? WiFi.localIP()
+                                                   : ETH.localIP();
+    uint32_t selfRaw = (uint32_t)selfIP;
+
+    content += F("<div class='node-picker'>"
+                 "<label for='nodeSelect'>Nodes on this network:</label>"
+                 "<select id='nodeSelect' onchange='gotoNode(this)'>");
+
+    content += F("<option value='' selected>");
+    content += htmlEscape(settings.nodeName.c_str());
+    content += F(" &mdash; ");
+    content += selfIP.toString();
+    content += F(" (this node)</option>");
+
+    int others = 0;
+    for (int i = 0; i < count; i++) {
+      if (nodes[i].ip == selfRaw) continue;   // never list ourselves twice
+      String ipStr = IPAddress(nodes[i].ip).toString();
+      content += F("<option value='");
+      content += ipStr;
+      content += F("'>");
+      String name = htmlEscape(nodes[i].name);
+      content += name.length() ? name : String(F("(unnamed node)"));
+      content += F(" &mdash; ");
+      content += ipStr;
+      content += F("</option>");
+      others++;
+    }
+    content += F("</select>");
+
+    content += F("<div class='fade-info'>");
+    if (others == 0) {
+      content += F("No other ArtNet nodes seen yet. Discovery runs every "
+                   "few seconds &mdash; reload to refresh.");
+    } else {
+      content += String(others);
+      content += (others == 1) ? F(" other node found. ") : F(" other nodes found. ");
+      content += F("Pick one to open its config page. Reload to refresh.");
+    }
+    content += F("</div></div>");
+  }
+
   content += F("<form method='POST' action='/config'>");
 
   // ── Node name ────────────────────────────────────────────────────────────
