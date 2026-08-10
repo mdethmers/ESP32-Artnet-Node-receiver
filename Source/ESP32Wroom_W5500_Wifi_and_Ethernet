@@ -52,6 +52,7 @@ int ShifterPin = 25;
 #include "I2SAPA102.h"               // APA102 driver
 #include "Arduino.h"
 #include "artnetESP32V2.h"
+#include "webassets.h"                // config-page CSS + JS, and ASSET_VER
 #include <Adafruit_NeoPixel.h>
 #include <SPI.h>
 #include <Wire.h>
@@ -98,6 +99,10 @@ void drawWiFiIcon(int x, int y);
 void handleOTAUpdate();
 void handleDoUpdate();
 void handleOTAUpdateResponse();
+void handleStyle();
+void handleScript();
+void handleNodes();
+void registerRoutes();
 void ESP32_W5500_onEvent();
 void showLeds();
 void setAllLeds(uint8_t r, uint8_t g, uint8_t b, uint8_t w1 = 0, uint8_t w2 = 0);
@@ -127,7 +132,10 @@ struct Settings {
   int     whiteLevel        = 0;
   int     white2Level       = 0;   // second white channel for RGBWW static colour
   int     ledType           = LED_TYPE_WS2812; // 0=WS2812, 1=APA102
-  int     protocolMode       = PROTOCOL_BOTH;  // 0=ArtNet, 1=sACN, 2=Both
+  // Art-Net only by default. Listening for both protocols costs a second
+  // socket and a second parse of every frame — overhead a node earns only if
+  // the console actually sends sACN.
+  int     protocolMode       = PROTOCOL_ARTNET;  // 0=ArtNet, 1=sACN, 2=Both
 
   // Convenience helpers -------------------------------------------------------
   bool isRGBW()   const { return channelMode == CHANNEL_MODE_RGBW;  }
@@ -314,6 +322,45 @@ String htmlEscape(const char *s) {
     }
   }
   return out;
+}
+
+// Same job as htmlEscape but for locally-set strings (node name, SSID,
+// password) that go back into an input's value. Non-ASCII is kept, so a UTF-8
+// passphrase survives a round trip through the form instead of being silently
+// mangled on the next save.
+String attrEscape(const String& s) {
+  String out;
+  out.reserve(s.length() + 8);
+  for (unsigned int i = 0; i < s.length(); i++) {
+    char c = s[i];
+    switch (c) {
+      case '&':  out += F("&amp;");  break;
+      case '<':  out += F("&lt;");   break;
+      case '>':  out += F("&gt;");   break;
+      case '"':  out += F("&quot;"); break;
+      case '\'': out += F("&#39;");  break;
+      default:   out += c;           break;
+    }
+  }
+  return out;
+}
+
+// Node names arrive over the network, so the /nodes JSON gets the same
+// printable-ASCII-only treatment as the HTML path.
+String jsonEscape(const char *s) {
+  String out;
+  for (const char *p = s; *p; p++) {
+    if (*p < 32 || *p > 126) continue;
+    if (*p == '"' || *p == '\\') out += '\\';
+    out += *p;
+  }
+  return out;
+}
+
+// Whichever interface is actually carrying the address right now.
+IPAddress currentIP() {
+  if (state.isAPMode) return WiFi.softAPIP();
+  return (settings.networkMode == 1) ? WiFi.localIP() : ETH.localIP();
 }
 
 // ─── Helper: show whatever driver is active ───────────────────────────────────
@@ -770,7 +817,7 @@ void loadSettings() {
   settings.whiteLevel        = preferences.getInt("whiteLevel",      settings.whiteLevel);
   settings.white2Level       = preferences.getInt("white2Level",     settings.white2Level);
   settings.ledType           = preferences.getInt("ledType",         settings.ledType);
-  settings.protocolMode      = preferences.getInt("protocolMode",    PROTOCOL_BOTH);
+  settings.protocolMode      = preferences.getInt("protocolMode",    settings.protocolMode);
 
 
   // ── channelMode migration ─────────────────────────────────────────────────
@@ -1090,10 +1137,7 @@ void setupWiFi() {
     displayConnectionStatus("Wi-Fi");
     delay(500);
   }
-  server.on("/", HTTP_GET, handleRoot);
-  server.on("/config", HTTP_POST, handleConfig);
-  server.on("/update", HTTP_GET, handleOTAUpdate);
-  server.on("/doUpdate", HTTP_POST, handleOTAUpdateResponse, handleDoUpdate);
+  registerRoutes();
   server.begin();
   displayStatus("Wi-Fi connected", settings.ssid);
   setStatusLED(0, 255, 0);
@@ -1124,10 +1168,7 @@ void setupEthernet() {
     displayConnectionStatus("Ethernet");
     delay(500);
   }
-  server.on("/", HTTP_GET, handleRoot);
-  server.on("/config", HTTP_POST, handleConfig);
-  server.on("/update", HTTP_GET, handleOTAUpdate);
-  server.on("/doUpdate", HTTP_POST, handleOTAUpdateResponse, handleDoUpdate);
+  registerRoutes();
   server.begin();
   Serial.println("Ethernet setup complete");
 }
@@ -1137,434 +1178,462 @@ void startAPMode() {
   state.isAPMode = true;
   WiFi.softAP(settings.nodeName.c_str());
   IPAddress IP = WiFi.softAPIP();
-  server.on("/", HTTP_GET, handleRoot);
-  server.on("/config", HTTP_POST, handleConfig);
-  server.on("/update", HTTP_GET, handleOTAUpdate);
-  server.on("/doUpdate", HTTP_POST, handleOTAUpdateResponse, handleDoUpdate);
+  registerRoutes();
   server.begin();
   setStatusLED(0, 0, 255);
   displayStatus("AP Mode", settings.nodeName, "IP:" + IP.toString());
 }
 
-// ─── CSS ──────────────────────────────────────────────────────────────────────
-const char* const CSS_STYLES = R"(
-:root {
-  --bg-color:#f4f4f4; --text-color:#333; --form-bg:#fff;
-  --input-bg:#fff; --input-border:#ccc; --button-bg:#4CAF50;
-  --button-hover:#45a049; --accent-color:#007bff;
-  --warning-color:#d9534f; --muted-text:#666;
+// ─── Asset + API routes ───────────────────────────────────────────────────────
+// CSS and JS live on their own cached routes (see webassets.h) instead of being
+// inlined into every page. The config page then fits comfortably in one String,
+// and a reload costs a few kB of markup rather than the whole UI.
+void handleStyle() {
+  server.sendHeader(F("Cache-Control"), F("max-age=604800"));
+  server.send_P(200, "text/css;charset=utf-8", CSS_STYLES);
 }
-body.dark-mode {
-  --bg-color:#1a1a1a; --text-color:#e0e0e0; --form-bg:#2d2d2d;
-  --input-bg:#3a3a3a; --input-border:#555; --button-bg:#ff8c00;
-  --button-hover:#ff7700; --accent-color:#ff8c00;
-  --warning-color:#ff6b6b; --muted-text:#999;
-}
-body{font-family:Arial,sans-serif;margin:0;padding:20px;background-color:var(--bg-color);color:var(--text-color);text-align:center;transition:background-color .3s,color .3s;}
-h1{font-size:24px;margin-bottom:20px;}
-.dark-mode-toggle{position:fixed;top:20px;right:20px;background-color:var(--accent-color);color:#fff;border:none;padding:10px 15px;border-radius:20px;cursor:pointer;font-size:14px;z-index:1000;}
-form{background-color:var(--form-bg);padding:20px;padding-right:40px;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,.1);max-width:400px;margin:auto;}
-input[type='text'],input[type='number']{width:100%;padding:10px;margin:10px 0;border:1px solid var(--input-border);border-radius:4px;font-size:16px;background-color:var(--input-bg);color:var(--text-color);}
-input[type='submit']{background-color:var(--button-bg);color:#fff;border:none;padding:12px;font-size:16px;cursor:pointer;border-radius:4px;width:100%;}
-input[type='submit']:hover{background-color:var(--button-hover);}
-.warning{margin-top:20px;color:var(--warning-color);font-size:14px;}
-.pin-input{width:60px!important;display:inline-block;margin-right:10px;}
-.pin-container{margin:10px 0;padding:10px;background-color:var(--input-bg);border-radius:5px;}
-.pin-label{display:inline-block;width:100px;text-align:left;}
-.radio-group{display:flex;justify-content:center;gap:20px;margin:10px 0;flex-wrap:wrap;}
-.radio-option{display:flex;align-items:center;gap:5px;}
-.slider-container{margin:15px 0;}
-.slider-value{display:inline-block;min-width:50px;text-align:center;font-weight:bold;}
-input[type='range']{width:70%;}
-a{color:var(--accent-color);}
-.default-pin{color:var(--muted-text);font-size:.9em;margin-left:5px;}
-.section-divider{border-top:1px solid var(--input-border);margin:15px 0;padding-top:10px;font-weight:bold;text-align:left;}
-.fade-info{font-size:0.85em;color:var(--muted-text);margin:4px 0 8px 0;text-align:left;}
-.node-picker{background-color:var(--form-bg);padding:15px 20px;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,.1);max-width:400px;margin:0 auto 20px auto;text-align:left;}
-.node-picker label{font-weight:bold;}
-.node-picker select{width:100%;padding:10px;margin:8px 0 4px 0;border:1px solid var(--input-border);border-radius:4px;font-size:16px;background-color:var(--input-bg);color:var(--text-color);}
-)";
 
-// ─── JavaScript ───────────────────────────────────────────────────────────────
-const char* const JS_CODE = R"(
-function togglePinInputs(){
-  document.getElementById('pin-container').style.display=
-    document.getElementById('enableCustomPins').checked?'block':'none';
+void handleScript() {
+  server.sendHeader(F("Cache-Control"), F("max-age=604800"));
+  server.send_P(200, "application/javascript;charset=utf-8", JS_CODE);
 }
-function toggleStaticIP(){
-  document.getElementById('static-ip-container').style.display=
-    document.getElementById('useStaticIP').checked?'block':'none';
-}
-function getChannelMode(){
-  return parseInt(document.querySelector('input[name="channelMode"]:checked').value);
-}
-function updateChannelMode(){
-  var cm=getChannelMode();
-  var staticColorEnabled=document.getElementById('enStatColor').checked;
-  document.getElementById('white-level-container').style.display=
-    (cm>=1&&staticColorEnabled)?'block':'none';
-  document.getElementById('white2-level-container').style.display=
-    (cm===2&&staticColorEnabled)?'block':'none';
-  updateUniverseSlider();
-}
-function updateStaticColorState(){
-  var cm=getChannelMode();
-  var on=document.getElementById('enStatColor').checked;
-  document.getElementById('white-level-container').style.display=(cm>=1&&on)?'block':'none';
-  document.getElementById('white2-level-container').style.display=(cm===2&&on)?'block':'none';
-}
-function updateUniverseSlider(){
-  var cm=getChannelMode();
-  var ledsPerUniverse=(cm===2)?102:(cm===1?128:170);
-  var universes=parseInt(document.getElementById('numLedsSlider').value);
-  var totalLeds=universes*ledsPerUniverse;
-  document.getElementById('numLedsValue').textContent=
-    universes+' universe'+(universes>1?'s':'')+' ('+totalLeds+' LEDs)';
-  document.getElementById('numledsoutput').value=totalLeds;
-}
-function updateOutputSlider(){
-  var v=document.getElementById('numOutputSlider').value;
-  document.getElementById('numOutputValue').textContent=v;
-  document.getElementById('numoutput').value=v;
-}
-function updateLedTypeUI(){
-  var isAPA102=document.querySelector('input[name="ledType"]:checked').value==='1';
-  document.getElementById('apa102-clock-info').style.display=isAPA102?'block':'none';
-  document.getElementById('rgbw-container').style.display=isAPA102?'none':'block';
-  if(isAPA102){
-    document.getElementById('ch0').checked=true;
-    document.getElementById('white-level-container').style.display='none';
-    document.getElementById('white2-level-container').style.display='none';
+
+// The refresh button asks for ?poll=1, which puts an ArtPoll on the wire before
+// answering. Replies land a few hundred ms later, so the page fetches once more
+// after a short wait to pick them up.
+void handleNodes() {
+  if (server.hasArg("poll")) artnet.sendArtPoll();
+
+  DiscoveredNode nodes[MAX_DISCOVERED_NODES];
+  int count = snapshotNodes(nodes, MAX_DISCOVERED_NODES);
+  sortNodesByIP(nodes, count);
+
+  IPAddress      selfIP  = currentIP();
+  uint32_t       selfRaw = (uint32_t)selfIP;
+  unsigned long  now     = millis();
+
+  String out;
+  out.reserve(120 + count * 72);
+  out += F("{\"self\":{\"n\":\"");
+  out += jsonEscape(settings.nodeName.c_str());
+  out += F("\",\"ip\":\"");
+  out += selfIP.toString();
+  out += F("\"},\"nodes\":[");
+
+  bool first = true;
+  for (int i = 0; i < count; i++) {
+    if (nodes[i].ip == selfRaw) continue;      // never list ourselves twice
+    if (!first) out += ',';
+    first = false;
+    out += F("{\"n\":\"");
+    out += jsonEscape(nodes[i].name);
+    out += F("\",\"ip\":\"");
+    out += IPAddress(nodes[i].ip).toString();
+    out += F("\",\"a\":");
+    out += String((now - nodes[i].lastSeen) / 1000);
+    out += '}';
   }
-}
-function gotoNode(sel){
-  if(sel.value){ location.href='http://'+sel.value+'/'; }
-}
-function toggleDarkMode(){
-  document.body.classList.toggle('dark-mode');
-  var isDark=document.body.classList.contains('dark-mode');
-  localStorage.setItem('darkMode',isDark?'enabled':'disabled');
-  document.getElementById('darkModeBtn').textContent=isDark?'Light Mode':'Dark Mode';
-}
-function updateUniverseHint(){
-  var sel=document.querySelector('input[name="protocolMode"]:checked');
-  var isSACN=sel && sel.value==='1';
-  var hidden=document.getElementById('startuniverse');
-  var display=document.getElementById('startuniverse_display');
-  // Display field shows +1 for sACN, raw value for ArtNet
-  display.value=isSACN ? (parseInt(hidden.value)+1) : parseInt(hidden.value);
-  document.getElementById('universe-hint').textContent=
-    isSACN ? 'sACN universe (1-based). Universe 1 = first universe.' :
-              'ArtNet universe (0-based). Universe 0 = first universe.';
-}
-function syncUniverseInput(){
-  var sel=document.querySelector('input[name="protocolMode"]:checked');
-  var isSACN=sel && sel.value==='1';
-  var hidden=document.getElementById('startuniverse');
-  var display=document.getElementById('startuniverse_display');
-  // User typed in display field — store raw 0-based value in hidden field
-  hidden.value=isSACN ? Math.max(0,parseInt(display.value)-1) : parseInt(display.value);
+  out += F("]}");
+
+  server.sendHeader(F("Cache-Control"), F("no-store"));
+  server.send(200, "application/json", out);
 }
 
-window.onload=function(){
-  togglePinInputs();
-  updateUniverseHint()
-  toggleStaticIP();
-  updateChannelMode();
-  updateUniverseSlider();
-  updateOutputSlider();
-  updateLedTypeUI();
-  if(localStorage.getItem('darkMode')==='enabled'){
-    document.body.classList.add('dark-mode');
-    document.getElementById('darkModeBtn').textContent='Light Mode';
-  }
-};
-)";
+void registerRoutes() {
+  server.on("/",          HTTP_GET,  handleRoot);
+  server.on("/config",    HTTP_POST, handleConfig);
+  server.on("/update",    HTTP_GET,  handleOTAUpdate);
+  server.on("/doUpdate",  HTTP_POST, handleOTAUpdateResponse, handleDoUpdate);
+  server.on("/style.css", HTTP_GET,  handleStyle);
+  server.on("/app.js",    HTTP_GET,  handleScript);
+  server.on("/nodes",     HTTP_GET,  handleNodes);
+}
 
+// ─── Page building blocks ─────────────────────────────────────────────────────
+// Every control on the page goes through one of these, which is what keeps the
+// layout uniform: one row shape, one toggle, one segmented control.
+
+static void pageHead(String& c, const String& title) {
+  c += F("<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>"
+         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+         "<meta name='color-scheme' content='light dark'>"
+         "<link rel='icon' href='data:,'><title>");
+  c += attrEscape(title);
+  c += F("</title><link rel='stylesheet' href='/style.css?v=" ASSET_VER "'>"
+         "<script>try{var t=localStorage.getItem('theme');"
+         "if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>"
+         "</head><body><div class='shell'>");
+}
+
+static void tipButton(String& c, const __FlashStringHelper* tip) {
+  c += F("<button type='button' class='tip' aria-label='What is this?' data-tip=\"");
+  c += tip;
+  c += F("\">i</button>");
+}
+
+// Opens a row and writes its label cell. The caller writes the control, then
+// closes with rowEnd().
+static void rowStart(String& c, const __FlashStringHelper* label,
+                     const __FlashStringHelper* tip,
+                     const char* forId = nullptr, const char* rowId = nullptr) {
+  c += F("<div class='row'");
+  if (rowId) { c += F(" id='"); c += rowId; c += F("'"); }
+  c += F("><span class='lbl'>");
+  if (forId) { c += F("<label for='"); c += forId; c += F("'>"); }
+  c += label;
+  if (forId) c += F("</label>");
+  if (tip) tipButton(c, tip);
+  c += F("</span>");
+}
+static void rowEnd(String& c) { c += F("</div>"); }
+
+static void segOption(String& c, const char* name, const char* id,
+                      int value, bool on, const __FlashStringHelper* label) {
+  c += F("<input type='radio' name='"); c += name;
+  c += F("' id='");   c += id;
+  c += F("' value='"); c += String(value);
+  c += on ? F("' checked>") : F("'>");
+  c += F("<label for='"); c += id; c += F("'>"); c += label; c += F("</label>");
+}
+
+static void toggleSwitch(String& c, const char* name, const char* id, bool on) {
+  c += F("<label class='sw'><input type='checkbox' name='"); c += name;
+  c += F("' id='"); c += id;
+  c += on ? F("' checked>") : F("'>");
+  c += F("<i></i></label>");
+}
+
+static void slider(String& c, const char* name, const char* id, int lo, int hi,
+                   int value, const char* outId, const String& outText,
+                   bool wideOut = false) {
+  // A nameless slider drives a hidden field instead of posting its own value —
+  // that is how the universe and output sliders work.
+  c += F("<div class='meter'><input type='range'");
+  if (name) { c += F(" name='"); c += name; c += F("'"); }
+  c += F(" id='");  c += id;
+  c += F("' min='"); c += String(lo);
+  c += F("' max='"); c += String(hi);
+  c += F("' value='"); c += String(value);
+  c += F("'><output id='"); c += outId;
+  c += wideOut ? F("' class='wide'>") : F("'>");
+  c += outText;
+  c += F("</output></div>");
+}
 // ─── Web root page ────────────────────────────────────────────────────────────
+// Reading order is setup order: find your node, name it and put it on the
+// network, patch it, describe the hardware, then say what it should output.
+// Anything a first-time setup does not need is behind a disclosure or only
+// appears once the switch above it is on.
 void handleRoot() {
-  String content = F("<!DOCTYPE html><html><head>"
-    "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-    "<link rel=\"icon\" href=\"data:,\">"
-    "<style>");
-  content += CSS_STYLES;
-  content += F("</style><script>");
-  content += JS_CODE;
-  content += F("</script></head><body>");
-  content += F("<button id='darkModeBtn' class='dark-mode-toggle' onclick='toggleDarkMode()'>Dark Mode</button>");
-  content += F("<h1>"); content += htmlEscape(settings.nodeName.c_str()); content += F(" Configuration</h1>");
+  IPAddress ip   = currentIP();
+  int       lpuv = getLedsPerUniverse();
+  int       upo  = max(1, min(4, (settings.numLedsPerOutput + lpuv - 1) / lpuv));
 
-  // ── Node picker ───────────────────────────────────────────────────────────
-  // Sits outside the form so the selection is never submitted with the config.
+  String c;
+  c.reserve(12000);
+  pageHead(c, settings.nodeName);
+
+  // ── Masthead: who am I, where am I, what am I speaking ────────────────────
+  c += F("<header class='masthead'><span class='dot");
+  if (state.isAPMode) c += F(" ap");
+  c += F("'></span><div class='id'><h1>");
+  c += attrEscape(settings.nodeName);
+  c += F("</h1><p class='readout'>");
+  c += ip.toString();
+  c += F(" &middot; ");
+  c += state.isAPMode           ? F("Access point")
+     : (settings.networkMode == 1) ? F("Wi-Fi")
+                                   : F("Ethernet");
+  c += F(" &middot; ");
+  c += (settings.protocolMode == PROTOCOL_ARTNET) ? F("Art-Net")
+     : (settings.protocolMode == PROTOCOL_SACN)   ? F("sACN")
+                                                  : F("Art-Net + sACN");
+  c += F("</p></div>"
+         "<button type='button' id='theme' class='icon lg' aria-label='Switch theme'></button>"
+         "</header>");
+
+  // ── Nodes on this network ─────────────────────────────────────────────────
+  // Outside the form, so picking a node never posts anything.
   {
     DiscoveredNode nodes[MAX_DISCOVERED_NODES];
-    int       count  = snapshotNodes(nodes, MAX_DISCOVERED_NODES);
+    int           count   = snapshotNodes(nodes, MAX_DISCOVERED_NODES);
     sortNodesByIP(nodes, count);
+    uint32_t      selfRaw = (uint32_t)ip;
+    unsigned long now     = millis();
 
-    IPAddress selfIP = state.isAPMode          ? WiFi.softAPIP()
-                     : (settings.networkMode == 1) ? WiFi.localIP()
-                                                   : ETH.localIP();
-    uint32_t selfRaw = (uint32_t)selfIP;
-
-    content += F("<div class='node-picker'>"
-                 "<label for='nodeSelect'>Nodes on this network:</label>"
-                 "<select id='nodeSelect' onchange='gotoNode(this)'>");
-
-    content += F("<option value='' selected>");
-    content += htmlEscape(settings.nodeName.c_str());
-    content += F(" &mdash; ");
-    content += selfIP.toString();
-    content += F(" (this node)</option>");
+    c += F("<section class='panel'><div class='legend'>Nodes on this network");
+    tipButton(c, F("Every node that answered an Art-Net poll in the last 15 seconds. "
+                   "Refresh polls the network again; replies take a moment to arrive."));
+    c += F("<button type='button' id='reload' class='icon' "
+           "aria-label='Refresh the node list'></button></div>"
+           "<ul class='nodes' id='nodes'><li class='here'><span class='nm'>");
+    c += attrEscape(settings.nodeName);
+    c += F("</span><span class='ip'>");
+    c += ip.toString();
+    c += F("</span><span class='tag'>This node</span></li>");
 
     int others = 0;
     for (int i = 0; i < count; i++) {
       if (nodes[i].ip == selfRaw) continue;   // never list ourselves twice
       String ipStr = IPAddress(nodes[i].ip).toString();
-      content += F("<option value='");
-      content += ipStr;
-      content += F("'>");
-      String name = htmlEscape(nodes[i].name);
-      content += name.length() ? name : String(F("(unnamed node)"));
-      content += F(" &mdash; ");
-      content += ipStr;
-      content += F("</option>");
+      String name  = htmlEscape(nodes[i].name);
+      c += F("<li><a class='nm' href='http://");
+      c += ipStr;
+      c += F("/'>");
+      c += name.length() ? name : String(F("Unnamed node"));
+      c += F("</a><span class='ip'>");
+      c += ipStr;
+      c += F("</span><span class='ip'>");
+      c += String((now - nodes[i].lastSeen) / 1000);
+      c += F("s ago</span></li>");
       others++;
     }
-    content += F("</select>");
 
-    content += F("<div class='fade-info'>");
+    c += F("</ul><p class='foot' id='nodecount'>");
     if (others == 0) {
-      content += F("No other ArtNet nodes seen yet. Discovery runs every "
-                   "few seconds &mdash; reload to refresh.");
+      c += F("No other Art-Net nodes have answered. Refresh to poll the network again.");
     } else {
-      content += String(others);
-      content += (others == 1) ? F(" other node found. ") : F(" other nodes found. ");
-      content += F("Pick one to open its config page. Reload to refresh.");
+      c += String(others);
+      c += (others == 1) ? F(" other node is") : F(" other nodes are");
+      c += F(" answering polls. Select one to open its configuration.");
     }
-    content += F("</div></div>");
+    c += F("</p></section>");
   }
 
-  content += F("<form method='POST' action='/config'>");
+  c += F("<form id='cfg' method='POST' action='/config'>");
 
-  // ── Node name ────────────────────────────────────────────────────────────
-  content += F("<label for='nodename'>Artnet Node name:</label>"
-               "<input type='text' id='nodename' name='nodename' value='");
-  content += settings.nodeName; content += F("'><br>");
+  // ── Node ──────────────────────────────────────────────────────────────────
+  c += F("<section class='panel'><div class='legend'>Node</div>");
 
-  // ── LED Type selector ─────────────────────────────────────────────────────
-  content += F("<div class='section-divider'>LED Strip Type</div>");
-  content += F("<div class='radio-group'>");
-  content += F("<div class='radio-option'>"
-               "<input type='radio' id='ws2812' name='ledType' value='0' onchange='updateLedTypeUI()' ");
-  content += (settings.ledType == LED_TYPE_WS2812) ? F("checked") : F("");
-  content += F("><label for='ws2812'>WS2812 / NeoPixel (800&nbsp;kHz)</label></div>");
-  content += F("<div class='radio-option'>"
-               "<input type='radio' id='apa102' name='ledType' value='1' onchange='updateLedTypeUI()' ");
-  content += (settings.ledType == LED_TYPE_APA102) ? F("checked") : F("");
-  content += F("><label for='apa102'>APA102 / DotStar (SPI)</label></div>");
-  content += F("</div>");
-  content += F("<div id='apa102-clock-info' style='display:");
-  content += (settings.ledType == LED_TYPE_APA102) ? F("block") : F("none");
-  content += F(";background:var(--input-bg);border-radius:5px;padding:8px;margin:8px 0;font-size:0.9em;text-align:left;'>"
-               "&#9432;&nbsp;APA102 uses a shared SPI clock on GPIO <strong>");
-  content += String(APA102_CLOCK_PIN);
-  content += F("</strong>. Data pins are configured below."
-               " Channel mode selection is not available for APA102 (always RGB).</div>");
+  rowStart(c, F("Name"),
+           F("Shown in your console's node list and in Art-Net poll replies. "
+             "Keep it under 18 characters — longer names are cut short on the wire."),
+           "nodename");
+  c += F("<input type='text' id='nodename' name='nodename' maxlength='17' value='");
+  c += attrEscape(settings.nodeName);
+  c += F("'>");
+  rowEnd(c);
 
-  // ── Channel mode ──────────────────────────────────────────────────────────
-  content += F("<div id='rgbw-container' style='display:");
-  content += (settings.ledType == LED_TYPE_APA102) ? F("none") : F("block");
-  content += F(";'>");
-  content += F("<div class='section-divider'>Channel Mode</div>");
-  content += F("<div class='radio-group'>");
+  rowStart(c, F("Link"),
+           F("Ethernet is the safe choice for anything past a test rig. Wi-Fi starts "
+             "dropping frames as the pixel count climbs."));
+  c += F("<div class='seg'>");
+  segOption(c, "link", "ln0", 0, !settings.useWiFi, F("Ethernet"));
+  segOption(c, "link", "ln1", 1,  settings.useWiFi, F("Wi-Fi"));
+  c += F("</div>");
+  rowEnd(c);
 
-  content += F("<div class='radio-option'>"
-               "<input type='radio' id='ch0' name='channelMode' value='0' onchange='updateChannelMode()' ");
-  content += (settings.channelMode == CHANNEL_MODE_RGB) ? F("checked") : F("");
-  content += F("><label for='ch0'>RGB (3 ch)</label></div>");
+  c += F("<div id='wifiRows'>");
+  rowStart(c, F("Wi-Fi network"), nullptr, "ssid");
+  c += F("<input type='text' id='ssid' name='ssid' value='");
+  c += attrEscape(settings.ssid);
+  c += F("'>");
+  rowEnd(c);
 
-  content += F("<div class='radio-option'>"
-               "<input type='radio' id='ch1' name='channelMode' value='1' onchange='updateChannelMode()' ");
-  content += (settings.channelMode == CHANNEL_MODE_RGBW) ? F("checked") : F("");
-  content += F("><label for='ch1'>RGBW (4 ch)</label></div>");
+  rowStart(c, F("Password"), nullptr, "password");
+  c += F("<div class='meter'><input type='password' id='password' name='password' value='");
+  c += attrEscape(settings.password);
+  c += F("'><button type='button' id='pwshow' class='btn link'>Show</button></div>");
+  rowEnd(c);
+  c += F("</div>");
 
-  content += F("<div class='radio-option'>"
-               "<input type='radio' id='ch2' name='channelMode' value='2' onchange='updateChannelMode()' ");
-  content += (settings.channelMode == CHANNEL_MODE_RGBWW) ? F("checked") : F("");
-  content += F("><label for='ch2'>RGBWW / CCT (5 ch)</label></div>");
+  rowStart(c, F("Fixed address"),
+           F("Give the node an address that never moves, so the patch in your console "
+             "keeps pointing at it. Leave off to take DHCP."),
+           "useStaticIP");
+  toggleSwitch(c, "useStaticIP", "useStaticIP", settings.useStaticIP);
+  rowEnd(c);
 
-  content += F("</div></div>");
+  c += F("<div id='ipRows'>");
+  rowStart(c, F("IP address"), nullptr, "staticIP");
+  c += F("<input type='text' class='mono' id='staticIP' name='staticIP' "
+         "placeholder='192.168.1.100' value='");
+  c += attrEscape(settings.staticIP);
+  c += F("'>");
+  rowEnd(c);
 
-  content += F("<div class='section-divider'>Protocol</div>");
-  content += F("<div class='radio-group'>");
-  content += F("<div class='radio-option'>"
-               "<input type='radio' name='protocolMode' value='0' onchange='updateUniverseHint()'");
-  content += (settings.protocolMode == PROTOCOL_ARTNET) ? F("checked") : F("");
-  content += F("><label>ArtNet</label></div>");
-  content += F("<div class='radio-option'>"
-               "<input type='radio' name='protocolMode' value='1' onchange='updateUniverseHint()'");
-  content += (settings.protocolMode == PROTOCOL_SACN) ? F("checked") : F("");
-  content += F("><label>sACN (E1.31)</label></div>");
-  content += F("<div class='radio-option'>"
-               "<input type='radio' name='protocolMode' value='2' onchange='updateUniverseHint()'");
-  content += (settings.protocolMode == PROTOCOL_BOTH) ? F("checked") : F("");
-  content += F("><label>ArtNet + sACN</label></div>");
-  content += F("</div>");
+  rowStart(c, F("Subnet mask"),
+           F("Optional. Left blank, the node takes a mask from the address itself — "
+             "/8 on a 2.x or 10.x lighting network, /24 anywhere else."),
+           "subnet");
+  c += F("<input type='text' class='mono' id='subnet' name='subnet' "
+         "placeholder='Automatic' value='");
+  c += attrEscape(settings.subnet);
+  c += F("'>");
+  rowEnd(c);
 
-  // ── Universe / LED slider ─────────────────────────────────────────────────
-  content += F("<div class='section-divider'>ArtNet Configuration</div>");
-  int lpuv             = getLedsPerUniverse();
-  int currentUniverses = max(1, min(4, (settings.numLedsPerOutput + lpuv - 1) / lpuv));
-  content += F("<div class='slider-container'>"
-               "<label for='numLedsSlider'>LEDs per output:</label><br>"
-               "<input type='range' id='numLedsSlider' min='1' max='4' step='1' value='");
-  content += String(currentUniverses);
-  content += F("' oninput='updateUniverseSlider()'>"
-               "<span class='slider-value' id='numLedsValue'></span>"
-               "<input type='hidden' id='numledsoutput' name='numledsoutput' value='");
-  content += String(settings.numLedsPerOutput);
-  content += F("'></div>");
+  rowStart(c, F("Gateway"),
+           F("Optional. Leave blank on an isolated lighting network. A gateway outside "
+             "the subnet is dropped rather than black-holing traffic."),
+           "gateway");
+  c += F("<input type='text' class='mono' id='gateway' name='gateway' "
+         "placeholder='None' value='");
+  c += attrEscape(settings.gateway);
+  c += F("'>");
+  rowEnd(c);
+  c += F("</div></section>");
 
-  content += F("<div class='slider-container'>"
-               "<label for='numOutputSlider'>Number of outputs:</label><br>"
-               "<input type='range' id='numOutputSlider' min='1' max='4' step='1' value='");
-  content += String(settings.numOutputs);
-  content += F("' oninput='updateOutputSlider()'>"
-               "<span class='slider-value' id='numOutputValue'>");
-  content += String(settings.numOutputs);
-  content += F("</span>"
-               "<input type='hidden' id='numoutput' name='numoutput' value='");
-  content += String(settings.numOutputs);
-  content += F("'></div>");
+  // ── Patch ─────────────────────────────────────────────────────────────────
+  c += F("<section class='panel'><div class='legend'>Patch</div>");
 
-  int displayUniverse = (settings.protocolMode == PROTOCOL_SACN)
-                      ? settings.startUniverse + 1
-                      : settings.startUniverse;
-  content += F("<label for='startuniverse_display'>Start universe:</label>"
-              "<input type='text' id='startuniverse_display' value='");
-  content += String(displayUniverse);
-  content += F("' oninput='syncUniverseInput()'>"
-              "<input type='hidden' id='startuniverse' name='startuniverse' value='");
-  content += String(settings.startUniverse);
-  content += F("'><br>");
-  content += F("<div class='fade-info' id='universe-hint'></div>");
+  rowStart(c, F("Protocol"),
+           F("Art-Net and sACN can run side by side. Pick what your console sends, "
+             "or leave both on if you are not sure."));
+  c += F("<div class='seg'>");
+  segOption(c, "protocolMode", "pm0", 0, settings.protocolMode == PROTOCOL_ARTNET, F("Art-Net"));
+  segOption(c, "protocolMode", "pm1", 1, settings.protocolMode == PROTOCOL_SACN,   F("sACN"));
+  segOption(c, "protocolMode", "pm2", 2, settings.protocolMode == PROTOCOL_BOTH,   F("Both"));
+  c += F("</div>");
+  rowEnd(c);
 
-  // ── Brightness ───────────────────────────────────────────────────────────
-  content += F("<div class='slider-container'>"
-               "<label for='ledbrightness'>Max. LED brightness:</label><br>"
-               "<input type='range' id='ledbrightness' name='ledbrightness' min='0' max='255' value='");
-  content += String(settings.ledBrightness);
-  content += F("' oninput='brightnessValue.value=this.value'>"
-               "<span class='slider-value'><output id='brightnessValue'>");
-  content += String(settings.ledBrightness);
-  content += F("</output></span></div>");
+  int shownUniverse = (settings.protocolMode == PROTOCOL_SACN) ? settings.startUniverse + 1
+                                                               : settings.startUniverse;
+  rowStart(c, F("First universe"),
+           F("The universe output 1 listens on. The remaining outputs take the "
+             "universes that follow it, in order."),
+           "uniStart");
+  c += F("<input type='text' class='mono' id='uniStart' inputmode='numeric' value='");
+  c += String(shownUniverse);
+  c += F("'><input type='hidden' id='startuniverse' name='startuniverse' value='");
+  c += String(settings.startUniverse);
+  c += F("'><p class='hint' id='uniHint'></p>");
+  rowEnd(c);
 
-  // ── Colour Options ───────────────────────────────────────────────────────
-  content += F("<div class='section-divider'>Colour Options</div>");
-  content += F("<label for='staticColor'>Static RGB Colour:</label>"
-               "<input type='color' id='staticColor' name='staticColor' value='");
-  content += settings.staticColor; content += F("'><br>");
+  rowStart(c, F("Universes per output"),
+           F("One universe carries 170 pixels in RGB, 128 in RGBW or 102 in RGBWW. "
+             "Outputs always begin on a universe boundary, so this is set in whole "
+             "universes."),
+           "uniSlider");
+  slider(c, nullptr, "uniSlider", 1, 4, upo, "uniVal", String(), true);
+  c += F("<input type='hidden' id='numledsoutput' name='numledsoutput' value='");
+  c += String(settings.numLedsPerOutput);
+  c += F("'>");
+  rowEnd(c);
 
-  content += F("<label for='enStatColor'>Enable Static Colour:</label>"
-               "<input type='checkbox' id='enStatColor' name='enStatColor'"
-               " onchange='updateStaticColorState()' ");
-  content += settings.enStatColor ? F("checked") : F(""); content += F("><br>");
+  rowStart(c, F("Outputs in use"),
+           F("How many data lines drive strips. Outputs you leave out stay dark and "
+             "consume no universes."),
+           "outSlider");
+  slider(c, nullptr, "outSlider", 1, 4, settings.numOutputs, "outVal",
+         String(settings.numOutputs));
+  c += F("<input type='hidden' id='numoutput' name='numoutput' value='");
+  c += String(settings.numOutputs);
+  c += F("'>");
+  rowEnd(c);
 
-  // White channel 1 (RGBW and RGBWW)
-  bool showW1 = (settings.channelMode >= CHANNEL_MODE_RGBW) && settings.enStatColor
-                 && (settings.ledType == LED_TYPE_WS2812);
-  content += F("<div id='white-level-container' style='display:");
-  content += showW1 ? F("block") : F("none");
-  content += F(";'><div class='slider-container'>"
-               "<label for='whiteLevel'>White Channel Level (W1):</label><br>"
-               "<input type='range' id='whiteLevel' name='whiteLevel' min='0' max='255' value='");
-  content += String(settings.whiteLevel);
-  content += F("' oninput='whiteLevelValue.value=this.value'>"
-               "<span class='slider-value'><output id='whiteLevelValue'>");
-  content += String(settings.whiteLevel);
-  content += F("</output></span></div></div>");
+  // The universe map: exactly which universes each output will listen on,
+  // redrawn as the sliders move. It is the one thing worth getting right
+  // before saving.
+  c += F("<div class='patch'><p class='patchhead'>Universe map</p>"
+         "<div class='strip' id='strip'></div>"
+         "<p class='tally' id='tally'></p></div></section>");
 
-  // White channel 2 (RGBWW only)
-  bool showW2 = (settings.channelMode == CHANNEL_MODE_RGBWW) && settings.enStatColor
-                 && (settings.ledType == LED_TYPE_WS2812);
-  content += F("<div id='white2-level-container' style='display:");
-  content += showW2 ? F("block") : F("none");
-  content += F(";'><div class='slider-container'>"
-               "<label for='white2Level'>White Channel Level (W2 / CCT):</label><br>"
-               "<input type='range' id='white2Level' name='white2Level' min='0' max='255' value='");
-  content += String(settings.white2Level);
-  content += F("' oninput='white2LevelValue.value=this.value'>"
-               "<span class='slider-value'><output id='white2LevelValue'>");
-  content += String(settings.white2Level);
-  content += F("</output></span></div></div>");
+  // ── Hardware ──────────────────────────────────────────────────────────────
+  c += F("<section class='panel'><div class='legend'>Hardware</div>");
 
-  content += F("<label for='ledCycleEnabled'>Enable RGB Test Cycle:</label>"
-               "<input type='checkbox' id='ledCycleEnabled' name='ledCycleEnabled' ");
-  content += settings.ledCycleEnabled ? F("checked") : F(""); content += F("><br>");
+  rowStart(c, F("Strip type"),
+           F("WS2812 and its relatives need one data line per output. APA102 adds a "
+             "clock line that every output shares."));
+  c += F("<div class='seg'>");
+  segOption(c, "ledType", "lt0", 0, settings.ledType == LED_TYPE_WS2812, F("WS2812"));
+  segOption(c, "ledType", "lt1", 1, settings.ledType == LED_TYPE_APA102, F("APA102"));
+  c += F("</div><p class='hint' id='apaNote'>APA102 shares a clock on GPIO ");
+  c += String(APA102_CLOCK_PIN);
+  c += F(" and always runs RGB. Data pins are set below.</p>");
+  rowEnd(c);
 
-  // ── Colour Fade (sequential) ──────────────────────────────────────────────
-  content += F("<label for='randomFadeEnabled'>Enable Colour Fade Cycle:</label>"
-               "<input type='checkbox' id='randomFadeEnabled' name='randomFadeEnabled' ");
-  content += settings.randomFadeEnabled ? F("checked") : F(""); content += F("><br>");
+  rowStart(c, F("Channels per pixel"),
+           F("Must match the fixture profile in your console. RGBW and RGBWW pixels "
+             "carry extra white channels after blue."),
+           nullptr, "chRow");
+  c += F("<div class='seg'>");
+  segOption(c, "channelMode", "cm0", 0, settings.channelMode == CHANNEL_MODE_RGB,   F("RGB"));
+  segOption(c, "channelMode", "cm1", 1, settings.channelMode == CHANNEL_MODE_RGBW,  F("RGBW"));
+  segOption(c, "channelMode", "cm2", 2, settings.channelMode == CHANNEL_MODE_RGBWW, F("RGBWW"));
+  c += F("</div>");
+  rowEnd(c);
 
-  // ── Custom pins ───────────────────────────────────────────────────────────
-  content += F("<div class='section-divider'>Pin Configuration</div>");
-  content += F("<label for='enableCustomPins'>Enable Custom Pins:</label>"
-               "<input type='checkbox' id='enableCustomPins' name='enableCustomPins'"
-               " onchange='togglePinInputs()' ");
-  content += settings.enableCustomPins ? F("checked") : F(""); content += F("><br>");
+  rowStart(c, F("Brightness ceiling"),
+           F("Applied after DMX, so your console still controls levels below it. "
+             "Use it to cap power draw."),
+           "ledbrightness");
+  slider(c, "ledbrightness", "ledbrightness", 0, 255, settings.ledBrightness, "brVal",
+         String(settings.ledBrightness));
+  rowEnd(c);
 
-  content += F("<div id='pin-container' class='pin-container'>");
+  c += F("<details><summary>Data pins");
+  tipButton(c, F("Change these only if your board wires the outputs differently. "
+                 "The defaults match the standard build."));
+  c += F("</summary>");
+  rowStart(c, F("Use custom pins"), nullptr, "enableCustomPins");
+  toggleSwitch(c, "enableCustomPins", "enableCustomPins", settings.enableCustomPins);
+  rowEnd(c);
+  c += F("<div class='pins' id='pinRows'>");
   for (int i = 0; i < NUMSTRIPS; i++) {
-    content += F("<div><span class='pin-label'>Output ");
-    content += String(i + 1);
-    content += F(" Data Pin:</span>"
-                 "<input type='number' class='pin-input' name='pin");
-    content += String(i);
-    content += F("' min='0' max='39' value='");
-    content += String(settings.pins[i]);
-    content += F("'><span class='default-pin'>(Default: ");
-    content += String(DEFAULT_PINS[i]);
-    content += F(")</span></div>");
+    c += F("<div class='pin'><span>Out ");
+    c += String(i + 1);
+    c += F("</span><input type='number' name='pin");
+    c += String(i);
+    c += F("' min='0' max='39' value='");
+    c += String(settings.pins[i]);
+    c += F("'><span>def ");
+    c += String(DEFAULT_PINS[i]);
+    c += F("</span></div>");
   }
-  content += F("</div>");
+  c += F("</div></details></section>");
 
-  // ── Network ───────────────────────────────────────────────────────────────
-  content += F("<div class='section-divider'>Network</div>");
-  content += F("<label for='useStaticIP'>Use Static IP:</label>"
-               "<input type='checkbox' id='useStaticIP' name='useStaticIP'"
-               " onchange='toggleStaticIP()' ");
-  content += settings.useStaticIP ? F("checked") : F(""); content += F("><br>");
+  // ── Output ────────────────────────────────────────────────────────────────
+  // One choice instead of three checkboxes that used to override each other.
+  int outMode = settings.randomFadeEnabled ? 3
+              : settings.ledCycleEnabled   ? 2
+              : settings.enStatColor       ? 1 : 0;
 
-  content += F("<div id='static-ip-container' style='display:none;'>");
-  content += F("<label>Static IP:</label><input type='text' name='staticIP' value='");
-  content += settings.staticIP; content += F("' placeholder='192.168.1.100'><br>");
-  content += F("<label>Gateway:</label><input type='text' name='gateway' value='");
-  content += settings.gateway; content += F("' placeholder='optional'><br>");
-  content += F("<label>Subnet:</label><input type='text' name='subnet' value='");
-  content += settings.subnet; content += F("' placeholder='optional'><br>");
-  content += F("<div class='fade-info'>Only the IP is required. Leave Subnet blank for an "
-               "automatic mask, and Gateway blank if the node stays on the local "
-               "network.</div></div>");
+  c += F("<section class='panel'><div class='legend'>Output</div>");
+  rowStart(c, F("What the strips show"),
+           F("Static colour, RGB test and fade all override incoming DMX. "
+             "Set Live DMX when the rig is running."));
+  c += F("<div class='seg'>");
+  segOption(c, "outputMode", "om0", 0, outMode == 0, F("Live DMX"));
+  segOption(c, "outputMode", "om1", 1, outMode == 1, F("Static"));
+  segOption(c, "outputMode", "om2", 2, outMode == 2, F("RGB test"));
+  segOption(c, "outputMode", "om3", 3, outMode == 3, F("Fade"));
+  c += F("</div><p class='hint' id='modeNote'></p>");
+  rowEnd(c);
 
-  content += F("<label for='useWiFi'>Use Wi-Fi:</label>"
-               "<input type='checkbox' id='useWiFi' name='useWiFi' ");
-  content += settings.useWiFi ? F("checked") : F(""); content += F("><br>");
-  content += F("<label>SSID:</label><input type='text' name='ssid' value='");
-  content += settings.ssid; content += F("'><br>");
-  content += F("<label>Password:</label><input type='text' name='password' value='");
-  content += settings.password; content += F("'><br>");
+  rowStart(c, F("Colour"), nullptr, "staticColor", "colorRow");
+  c += F("<input type='color' id='staticColor' name='staticColor' value='");
+  // Stored without a leading # on a factory-fresh node; the colour input needs one.
+  if (!settings.staticColor.startsWith("#")) c += '#';
+  c += attrEscape(settings.staticColor);
+  c += F("'>");
+  rowEnd(c);
 
-  content += F("<input type='submit' value='Save &amp; Restart'>");
-  content += F("</form>");
-  content += F("<div class='warning'><p><strong>Warning:</strong> Ensure node settings "
-               "match your software (pixel count / universes).</p></div>");
-  content += F("<div style='margin-top:20px;'>"
-               "<a href='/update' style='background-color:#007bff;color:#fff;padding:10px 15px;"
-               "text-decoration:none;border-radius:4px;display:inline-block;'>Firmware Update</a>"
-               "</div>");
-  content += F("</body></html>");
-  server.send(200, "text/html", content);
+  rowStart(c, F("White level"),
+           F("Level held on the first white channel while a static colour is showing."),
+           "whiteLevel", "w1Row");
+  slider(c, "whiteLevel", "whiteLevel", 0, 255, settings.whiteLevel, "w1Val",
+         String(settings.whiteLevel));
+  rowEnd(c);
+
+  rowStart(c, F("Second white"),
+           F("Level held on the second white channel of RGBWW / CCT pixels."),
+           "white2Level", "w2Row");
+  slider(c, "white2Level", "white2Level", 0, 255, settings.white2Level, "w2Val",
+         String(settings.white2Level));
+  rowEnd(c);
+  c += F("</section>");
+
+  c += F("<div class='dock'><p class='note'>Saving restarts the node. Outputs go dark "
+         "for a few seconds.</p>"
+         "<input type='submit' id='save' class='btn go' value='Save &amp; restart'></div>"
+         "</form>");
+
+  c += F("<div class='pagefoot'><span>Match the pixel count and universes here to the "
+         "patch in your console.</span>"
+         "<a class='btn link' href='/update'>Firmware update</a></div>");
+
+  c += F("</div><script src='/app.js?v=" ASSET_VER "' defer></script></body></html>");
+  server.send(200, "text/html", c);
 }
 
 // ─── Config POST handler ──────────────────────────────────────────────────────
@@ -1599,11 +1668,24 @@ void handleConfig() {
     }
   }
 
-  settings.useWiFi          = server.hasArg("useWiFi");
-  settings.enStatColor       = server.hasArg("enStatColor");
-  settings.ledCycleEnabled   = server.hasArg("ledCycleEnabled");
-  settings.randomFadeEnabled = server.hasArg("randomFadeEnabled");   // NEW
-  settings.networkMode       = settings.useWiFi ? 1 : 0;
+  // Interface. The page posts "link" (0 = Ethernet, 1 = Wi-Fi); the older
+  // "useWiFi" checkbox is still honoured so an existing bookmark keeps working.
+  if (server.hasArg("link")) settings.useWiFi = (server.arg("link").toInt() == 1);
+  else                       settings.useWiFi = server.hasArg("useWiFi");
+  settings.networkMode = settings.useWiFi ? 1 : 0;
+
+  // What the strips show. The three flags used to be independent checkboxes
+  // that overrode each other; the page now posts one exclusive choice.
+  if (server.hasArg("outputMode")) {
+    int m = server.arg("outputMode").toInt();
+    settings.enStatColor       = (m == 1);
+    settings.ledCycleEnabled   = (m == 2);
+    settings.randomFadeEnabled = (m == 3);
+  } else {
+    settings.enStatColor       = server.hasArg("enStatColor");
+    settings.ledCycleEnabled   = server.hasArg("ledCycleEnabled");
+    settings.randomFadeEnabled = server.hasArg("randomFadeEnabled");
+  }
 
   bool wasCustom = settings.enableCustomPins;
   settings.enableCustomPins = server.hasArg("enableCustomPins");
@@ -1651,27 +1733,79 @@ void handleConfig() {
   state.isStaticColorSet = false;
   saveSettings();
 
-  server.sendHeader("Location", "/", true);
-  server.send(302, "text/plain", "");
+  // Redirecting into a device that is about to reboot lands the browser on a
+  // connection error. Hand back a page that waits for the node to answer again
+  // and then goes home by itself — or, if the address is changing, says where
+  // to find it.
+  String here   = currentIP().toString();
+  String target = settings.useStaticIP ? settings.staticIP : here;
+  bool   moved  = (target != here);
+
+  String c;
+  c.reserve(2400);
+  pageHead(c, settings.nodeName);
+  c += F("<header class='masthead'><span class='dot'></span><div class='id'>"
+         "<h1>Saved</h1><p class='readout'>");
+  c += attrEscape(settings.nodeName);
+  c += F("</p></div></header>"
+         "<section class='panel'><div class='legend'>Restarting</div>"
+         "<p class='foot' style='border-top:0'id='msg'>");
+  if (moved) {
+    c += F("The node is moving to <b class='mono'>");
+    c += attrEscape(target);
+    c += F("</b>. Open that address once the strips light up again.");
+  } else {
+    c += F("Waiting for the node to come back. This page reloads by itself.");
+  }
+  c += F("</p></section>");
+
+  if (moved) {
+    c += F("<div class='pagefoot'><a class='btn link' href='http://");
+    c += attrEscape(target);
+    c += F("/'>Open ");
+    c += attrEscape(target);
+    c += F("</a></div>");
+  } else {
+    // First probe waits out the reboot itself, then retries for about a minute.
+    c += F("<script>var n=0;function p(){n++;fetch('/nodes',{cache:'no-store'})"
+           ".then(function(){location.href='/'}).catch(function(){"
+           "if(n<40)setTimeout(p,1500);else document.getElementById('msg').textContent="
+           "'The node has not answered yet. Reload once it is back on the network.'})}"
+           "setTimeout(p,4000)</script>");
+  }
+  c += F("</div></body></html>");
+
+  server.send(200, "text/html", c);
   delay(500);
   ESP.restart();
 }
 
 // ─── OTA pages ────────────────────────────────────────────────────────────────
 void handleOTAUpdate() {
-  String content = F("<!DOCTYPE html><html><head>"
-    "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-    "<link rel=\"icon\" href=\"data:,\"><style>");
-  content += CSS_STYLES;
-  content += F("</style></head><body>");
-  content += F("<h1>"); content += settings.nodeName; content += F(" - OTA Update</h1>");
-  content += F("<form method='POST' action='/doUpdate' enctype='multipart/form-data'>"
-               "<p>Select firmware .bin file:</p>"
-               "<input type='file' name='update' accept='.bin'><br><br>"
-               "<input type='submit' value='Upload and Update'></form>");
-  content += F("<div class='warning'><p><strong>Warning:</strong> Uploading incorrect firmware may brick your device.</p></div>");
-  content += F("<p><a href='/'>Return to configuration</a></p></body></html>");
-  server.send(200, "text/html", content);
+  String c;
+  c.reserve(1800);
+  pageHead(c, settings.nodeName);
+  c += F("<header class='masthead'><span class='dot'></span><div class='id'>"
+         "<h1>Firmware update</h1><p class='readout'>");
+  c += attrEscape(settings.nodeName);
+  c += F("</p></div>"
+         "<button type='button' id='theme' class='icon lg' aria-label='Switch theme'></button>"
+         "</header>"
+         "<form method='POST' action='/doUpdate' enctype='multipart/form-data'>"
+         "<section class='panel'><div class='legend'>New firmware</div>");
+  rowStart(c, F("Firmware file"),
+           F("A .bin built for this board. Settings survive the update; the node "
+             "restarts on its own when the upload finishes."),
+           "fw");
+  c += F("<input type='file' id='fw' name='update' accept='.bin'>");
+  rowEnd(c);
+  c += F("</section>"
+         "<div class='dock'><p class='note'><b>Check the board first.</b> Firmware "
+         "built for a different one will leave this node unbootable.</p>"
+         "<input type='submit' class='btn go' value='Upload'></div></form>"
+         "<div class='pagefoot'><a class='btn link' href='/'>Back to configuration</a></div>"
+         "</div><script src='/app.js?v=" ASSET_VER "' defer></script></body></html>");
+  server.send(200, "text/html", c);
 }
 
 void handleDoUpdate() {
@@ -1705,14 +1839,31 @@ void handleDoUpdate() {
 }
 
 void handleOTAUpdateResponse() {
-  if (Update.hasError()) {
-    server.send(200, "text/html",
-      "<h1>Update Failed!</h1><p><a href='/update'>Try again</a></p>");
-  } else {
-    server.send(200, "text/html",
-      "<!DOCTYPE html><html><head>"
-      "<meta http-equiv='refresh' content='5;url=/' /></head>"
-      "<body><h1>Update Successful!</h1><p>Rebooting in 5 seconds...</p></body></html>");
+  bool failed = Update.hasError();
+
+  String c;
+  c.reserve(1400);
+  pageHead(c, settings.nodeName);
+  c += F("<header class='masthead'><span class='dot'></span><div class='id'><h1>");
+  c += failed ? F("Update failed") : F("Update installed");
+  c += F("</h1><p class='readout'>");
+  c += attrEscape(settings.nodeName);
+  c += F("</p></div></header><section class='panel'><p class='foot' "
+         "style='border-top:0'>");
+  c += failed ? F("The upload did not complete, so the node kept its current firmware. "
+                  "Check the file and try again.")
+              : F("Restarting on the new firmware. This page returns to the "
+                  "configuration in a few seconds.");
+  c += F("</p></section><div class='pagefoot'><a class='btn link' href='");
+  c += failed ? F("/update'>Try again") : F("/'>Configuration");
+  c += F("</a></div></div></body></html>");
+
+  if (!failed) {
+    server.sendHeader(F("Refresh"), F("6; url=/"));
+  }
+  server.send(200, "text/html", c);
+
+  if (!failed) {
     delay(1000);
     ESP.restart();
   }
