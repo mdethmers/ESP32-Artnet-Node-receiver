@@ -7,7 +7,7 @@
 // not understand C++11 raw string literals — it reads the JavaScript inside
 // them as C++ and emits prototypes for it, which then fail to compile.
 
-#define ASSET_VER "1"
+#define ASSET_VER "2"
 
 // Colours follow the node's own signal language: amber is anything you can act
 // on (the status LED and a venue worklight are both amber), green is live,
@@ -256,17 +256,36 @@ function refresh(){
     .then(function(){b.classList.remove('busy')})}
 
 function chMode(){return $('#lt1').checked?0:pick('channelMode')}
+/* Fixtures per universe. Ungrouped a fixture is one LED, which is where the
+   familiar 170 / 128 / 102 come from. */
 function perUniverse(){var m=chMode();return m===2?102:m===1?128:170}
 function isSACN(){return pick('protocolMode')===1}
 
 /* Everything the form shows is derived here, so any change re-runs one pass. */
 function syncAll(){
   var apa=$('#lt1').checked,cm=chMode(),per=perUniverse();
-  var upo=+$('#uniSlider').value,outs=+$('#outSlider').value;
+  var outs=+$('#outSlider').value;
   var raw=parseInt($('#startuniverse').value,10)||0,base=raw+(isSACN()?1:0);
 
   show('#chRow',!apa);show('#apaNote',apa);
   if(apa)$('#cm0').checked=true;
+
+  /* Grouping multiplies how many LEDs a universe of fixtures can drive, so the
+     universe slider's range shrinks as the group grows — four universes of
+     quadrupled pixels would run past the strip length the drivers are built
+     for. The pixel ceiling is four universes' worth, whatever the mode. */
+  var grp=Math.min(16,Math.max(1,+$('#grpSlider').value||1));
+  var maxU=Math.max(1,Math.floor(4/grp));
+  var us=$('#uniSlider');
+  us.max=maxU;
+  var upo=Math.min(maxU,Math.max(1,+us.value));
+
+  /* Mirrors getFixturesPerOutput() / getUniversesPerOutput() on the node, so the
+     map on screen is the patch the node will actually listen on. */
+  var leds=Math.min(4*per,upo*per*grp);
+  var fix=Math.ceil(leds/grp);
+  upo=Math.max(1,Math.min(4,Math.ceil(fix/per)));
+  us.value=upo;
 
   /* Widest label in the map decides the chip type size, so a start universe of
      1000 stays readable in a four-across group instead of being cut off. */
@@ -278,11 +297,21 @@ function syncAll(){
     h+='<div class="grp"><b>Output '+(o+1)+'</b><div class="cells" style="grid-template-columns:repeat('+
        upo+',1fr);font-size:'+size+'px">'+u+'</div></div>'}
   $('#strip').innerHTML=h;
-  $('#tally').innerHTML='<b>'+(upo*per)+'</b> pixels per output · <b>'+(outs*upo)+
-    '</b> universes · <b>'+(outs*upo*per)+'</b> pixels in total';
-  $('#numledsoutput').value=upo*per;
+  $('#tally').innerHTML='<b>'+leds+'</b> pixels per output · <b>'+fix+
+    '</b> fixtures per output · <b>'+(outs*upo)+'</b> universes · <b>'+
+    (outs*leds)+'</b> pixels in total';
+  $('#numledsoutput').value=leds;
   $('#numoutput').value=outs;
   $('#uniVal').value=upo+(upo>1?' universes':' universe');
+  $('#grpVal').value=grp===1?'1 pixel':grp+' pixels';
+  /* A strip that does not divide evenly ends in a short fixture rather than
+     losing its tail, so say so before it looks like a fault on site. */
+  var tail=leds-(fix-1)*grp;
+  $('#grpHint').textContent=grp===1
+    ?'Every pixel is addressed on its own — the original behaviour.'
+    :'Each fixture drives '+grp+' pixels, so this output needs '+fix+
+     ' fixtures instead of '+leds+'.'+
+     (tail!==grp?' The last fixture drives '+tail+'.':'');
   $('#outVal').value=outs;
   $('#uniHint').textContent=isSACN()
     ?'sACN counts universes from 1. Enter the number your console shows.'
