@@ -28,6 +28,7 @@
 #define NUM_LEDS_PER_STRIP    680
 #define NUMSTRIPS             4
 #define UNIVERSE_SIZE_IN_CHANNEL 512
+#define MAX_GROUP_SIZE        16    // largest number of LEDs one fixture may drive
 #define COLOR_GRB
 
 // APA102 clock pin — MUST be > 16 on ESP32
@@ -106,6 +107,11 @@ void registerRoutes();
 void ESP32_W5500_onEvent();
 void showLeds();
 void setAllLeds(uint8_t r, uint8_t g, uint8_t b, uint8_t w1 = 0, uint8_t w2 = 0);
+int  getChannelsPerLed();
+int  getLedsPerUniverse();
+int  getGroupSize();
+int  getFixturesPerOutput();
+int  getUniversesPerOutput();
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
 struct Settings {
@@ -129,6 +135,11 @@ struct Settings {
   String  subnet            = "255.255.255.0";
   int     networkMode       = 0;   // 0=Ethernet 1=WiFi 2=AP 3=RGB-test 4=Static
   int     channelMode       = CHANNEL_MODE_RGB; // 0=RGB, 1=RGBW, 2=RGBWW
+  // How many physical LEDs act as one addressable fixture. 1 = every LED is its
+  // own fixture (the original behaviour). Higher values cut the patch by the
+  // same factor: the console addresses ceil(leds / groupSize) fixtures and the
+  // node fans each one out across its LEDs.
+  int     groupSize         = 1;
   int     whiteLevel        = 0;
   int     white2Level       = 0;   // second white channel for RGBWW static colour
   int     ledType           = LED_TYPE_WS2812; // 0=WS2812, 1=APA102
@@ -220,6 +231,17 @@ artnetESP32V2      artnet = artnetESP32V2();
 // MAX_LEDS_RGB is the largest possible count (RGB mode), so size the buffer for that.
 I2SClocklessLedDriver driver;
 uint8_t ledData[NUMSTRIPS * MAX_LEDS_RGB * 5]; // worst-case: 5 bytes per LED (RGBWW)
+
+// Grouped output writes an expanded frame instead of handing the network buffer
+// straight to the driver, and showPixels(NO_WAIT) keeps reading that frame while
+// the next one arrives. Two buffers, used alternately, keep the transfer in
+// progress away from the frame being built. The second one is only allocated
+// when grouping is actually switched on; ungrouped nodes pay nothing for it.
+// If the allocation fails we fall back to one buffer and a blocking show, which
+// is slower but never tears.
+uint8_t    *ledFrames[2]   = { ledData, ledData };
+uint8_t     ledFrameIdx    = 0;
+DisplayMode groupShowMode  = NO_WAIT;
 
 // APA102 driver + CRGB buffer
 I2SAPA102 controller(0);
@@ -413,23 +435,83 @@ void setAllLeds(uint8_t r, uint8_t g, uint8_t b, uint8_t w1, uint8_t w2) {
 }
 
 // ─── ArtNet callback ──────────────────────────────────────────────────────────
+// Ungrouped, the received frame already has the exact layout both drivers want,
+// so it goes straight out. Grouped, the frame is smaller than the strips — one
+// fixture per group instead of per LED — and has to be fanned out first.
+//
+// The source walks universe blocks, not pixels: each output owns
+// universesPerOutput whole universes whether or not it fills them, so the read
+// pointer advances by that stride and any unused tail of an output's last
+// universe is simply skipped.
 void displayfunction(void *param) {
   subArtnet *subartnet = (subArtnet *)param;
+
+  const int group = getGroupSize();
 
   if (settings.ledType == LED_TYPE_APA102) {
     // APA102 is always RGB — unpack into CRGB array
     uint8_t *src = subartnet->data;
-    int total = settings.numOutputs * settings.numLedsPerOutput;
-    for (int i = 0; i < total; i++) {
-      leds[i].r = src[i * 3 + 0];
-      leds[i].g = src[i * 3 + 1];
-      leds[i].b = src[i * 3 + 2];
+
+    if (group == 1) {
+      int total = settings.numOutputs * settings.numLedsPerOutput;
+      for (int i = 0; i < total; i++) {
+        leds[i].r = src[i * 3 + 0];
+        leds[i].g = src[i * 3 + 1];
+        leds[i].b = src[i * 3 + 2];
+      }
+    } else {
+      const int stride   = getUniversesPerOutput() * getLedsPerUniverse() * 3;
+      const int fixtures = getFixturesPerOutput();
+
+      for (int out = 0; out < settings.numOutputs; out++) {
+        const uint8_t *block = src  + out * stride;
+        CRGB          *dst   = leds + out * settings.numLedsPerOutput;
+
+        for (int f = 0; f < fixtures; f++) {
+          const uint8_t *fx = block + f * 3;
+          for (int g = 0; g < group; g++) {
+            int led = f * group + g;
+            if (led >= settings.numLedsPerOutput) break;   // short final group
+            dst[led].r = fx[0];
+            dst[led].g = fx[1];
+            dst[led].b = fx[2];
+          }
+        }
+      }
     }
     controller.showPixels();
-  } else {
+
+  } else if (group == 1) {
     // WS2812 — pass raw buffer directly (works for RGB, RGBW and RGBWW
     // because the driver was initialised with the correct colour arrangement)
     driver.showPixels(NO_WAIT, subartnet->data);
+
+  } else {
+    const int ch       = getChannelsPerLed();
+    const int stride   = getUniversesPerOutput() * getLedsPerUniverse() * ch;
+    const int fixtures = getFixturesPerOutput();
+    const int outBytes = settings.numLedsPerOutput * ch;   // driver's strip pitch
+
+    // Outputs not in use are never written and stay at the zero the buffers were
+    // cleared to at boot.
+    uint8_t *frame = ledFrames[ledFrameIdx];
+
+    for (int out = 0; out < settings.numOutputs; out++) {
+      const uint8_t *block = subartnet->data + out * stride;
+      uint8_t       *dst   = frame           + out * outBytes;
+
+      for (int f = 0; f < fixtures; f++) {
+        const uint8_t *fx = block + f * ch;
+        for (int g = 0; g < group; g++) {
+          int led = f * group + g;
+          if (led >= settings.numLedsPerOutput) break;     // short final group
+          memcpy(dst + led * ch, fx, ch);
+        }
+      }
+    }
+
+    driver.showPixels(groupShowMode, frame);
+    if (ledFrames[1] != ledFrames[0]) ledFrameIdx ^= 1;
   }
 }
 
@@ -451,8 +533,37 @@ int getChannelsPerLed() {
 }
 
 int getLedsPerUniverse() {
-  // How many LEDs fit in one 512-byte ArtNet universe
+  // How many fixtures fit in one 512-byte ArtNet universe. Without grouping a
+  // fixture is a single LED, which is why this reads as "LEDs per universe"
+  // everywhere it is used.
   return UNIVERSE_SIZE_IN_CHANNEL / getChannelsPerLed();
+}
+
+int getGroupSize() {
+  int g = settings.groupSize;
+  if (g < 1)              g = 1;
+  if (g > MAX_GROUP_SIZE) g = MAX_GROUP_SIZE;
+  return g;
+}
+
+// What the console actually addresses on one output. A strip whose length is
+// not a multiple of the group size ends in a short group rather than losing
+// its tail — the last fixture simply drives fewer LEDs.
+int getFixturesPerOutput() {
+  int g = getGroupSize();
+  return (settings.numLedsPerOutput + g - 1) / g;
+}
+
+// Outputs always begin on a universe boundary, so an output that does not fill
+// its last universe still reserves the whole thing and the next output starts
+// at the following universe number. That keeps the patch stable: changing the
+// group size never shifts the outputs after it.
+int getUniversesPerOutput() {
+  int per = getLedsPerUniverse();
+  int u   = (getFixturesPerOutput() + per - 1) / per;
+  if (u < 1) u = 1;
+  if (u > 4) u = 4;
+  return u;
 }
 
 // ─── Sequential colour fade: tick called from loop() ─────────────────────────
@@ -600,6 +711,23 @@ void setup() {
     // Clear the buffer after driver init — prevents stale bytes causing
     // a rogue full-white first LED when ArtNet data starts arriving.
     memset(ledData, 0, sizeof(ledData));
+
+    // Grouped output builds each frame itself, so it needs somewhere to build
+    // the next one while the driver is still clocking out the last. Claimed
+    // before the Art-Net buffers, which take whatever heap is left over.
+    if (getGroupSize() > 1) {
+      uint8_t *second = (uint8_t *)calloc(sizeof(ledData), 1);
+      if (second) {
+        ledFrames[1]  = second;
+        groupShowMode = NO_WAIT;
+        Serial.printf("Grouping x%d — double-buffered\n", getGroupSize());
+      } else {
+        // One buffer left: block until the frame is on the wire before the next
+        // one overwrites it. Costs the callback task the transmit time.
+        groupShowMode = WAIT;
+        Serial.println("Grouping — second frame buffer unavailable, using blocking show");
+      }
+    }
   }
 
   // ── Networking ────────────────────────────────────────────────────────────
@@ -625,20 +753,25 @@ void setup() {
 
     String ipStr = activeIP.toString();
     int lpuv = getLedsPerUniverse();
-    int universesPerOutput = (settings.numLedsPerOutput + lpuv - 1) / lpuv;
+    int universesPerOutput = getUniversesPerOutput();
     String protoStr = (settings.protocolMode == PROTOCOL_ARTNET) ? "AN" :
                     (settings.protocolMode == PROTOCOL_SACN)   ? "sACN" : "AN+sACN";
     String ledsInfo = "LED:" + String(settings.numLedsPerOutput) +
+                      (getGroupSize() > 1 ? "/" + String(getGroupSize()) : "") +
                       " Uni:" + String(universesPerOutput) +
                       " " + protoStr;
     displayStatus(settings.nodeName, ipStr, ledsInfo);
 
     int universeSize   = lpuv * getChannelsPerLed();
-    int channelsPerLed = getChannelsPerLed();
 
+    // Sized in whole universes per output rather than in pixels, so an output
+    // that only partly fills its last universe still reserves it and the next
+    // output starts on the following universe boundary. Without grouping this
+    // is the same number as before: numLedsPerOutput is always a whole number
+    // of universes there.
     artnet.addSubArtnet(
       settings.startUniverse,
-      settings.numLedsPerOutput * settings.numOutputs * channelsPerLed,
+      settings.numOutputs * universesPerOutput * universeSize,
       universeSize,
       &displayfunction
     );
@@ -665,10 +798,8 @@ void setup() {
     // Optional: join sACN multicast groups (needed for multicast sACN sources
     // such as some lighting consoles). Unicast sACN works without this.
     if (settings.protocolMode != PROTOCOL_ARTNET) {
-      int lpuv              = getLedsPerUniverse();
-      int universesPerOutput = (settings.numLedsPerOutput + lpuv - 1) / lpuv;
       artnet.joinSACNMulticast(settings.startUniverse,
-                               universesPerOutput * settings.numOutputs);
+                               getUniversesPerOutput() * settings.numOutputs);
     }
   }
 }
@@ -717,10 +848,9 @@ void loop() {
       } else {
         if (wasDisconnected || !lastConnectionState) {
           setStatusLED(0, 255, 0);
-          int lpuv = getLedsPerUniverse();
-          int universesPerOutput = (settings.numLedsPerOutput + lpuv - 1) / lpuv;
           String ledsInfo = "LED:" + String(settings.numLedsPerOutput) +
-                            " Uni:" + String(universesPerOutput) +
+                            (getGroupSize() > 1 ? "/" + String(getGroupSize()) : "") +
+                            " Uni:" + String(getUniversesPerOutput()) +
                             " Out:" + String(settings.numOutputs);
           displayStatus(settings.nodeName, "WiFi: " + WiFi.localIP().toString(), ledsInfo, "", true);
           wasDisconnected = false;
@@ -746,10 +876,9 @@ void loop() {
           setStatusLED(0, 255, 0);
           String ipInfo = settings.useStaticIP ? "Static: " + settings.staticIP
                                                 : "DHCP: " + ETH.localIP().toString();
-          int lpuv = getLedsPerUniverse();
-          int universesPerOutput = (settings.numLedsPerOutput + lpuv - 1) / lpuv;
           String ledsInfo = "LED:" + String(settings.numLedsPerOutput) +
-                            " Uni:" + String(universesPerOutput) +
+                            (getGroupSize() > 1 ? "/" + String(getGroupSize()) : "") +
+                            " Uni:" + String(getUniversesPerOutput()) +
                             " Out:" + String(settings.numOutputs);
           displayStatus(settings.nodeName, ipInfo, ledsInfo);
           wasDisconnected = false;
@@ -818,6 +947,11 @@ void loadSettings() {
   settings.white2Level       = preferences.getInt("white2Level",     settings.white2Level);
   settings.ledType           = preferences.getInt("ledType",         settings.ledType);
   settings.protocolMode      = preferences.getInt("protocolMode",    settings.protocolMode);
+  // Absent on a node upgraded from older firmware, which is exactly the
+  // ungrouped behaviour it had before.
+  settings.groupSize         = preferences.getInt("groupSize",       1);
+  if (settings.groupSize < 1)              settings.groupSize = 1;
+  if (settings.groupSize > MAX_GROUP_SIZE) settings.groupSize = MAX_GROUP_SIZE;
 
 
   // ── channelMode migration ─────────────────────────────────────────────────
@@ -866,6 +1000,7 @@ void saveSettings() {
   preferences.putInt("white2Level",     settings.white2Level);
   preferences.putInt("ledType",         settings.ledType);
   preferences.putInt("protocolMode",    settings.protocolMode);
+  preferences.putInt("groupSize",       settings.groupSize);
 
   for (int i = 0; i < NUMSTRIPS; i++) {
     char key[10]; sprintf(key, "pin%d", i);
@@ -1325,9 +1460,8 @@ static void slider(String& c, const char* name, const char* id, int lo, int hi,
 // Anything a first-time setup does not need is behind a disclosure or only
 // appears once the switch above it is on.
 void handleRoot() {
-  IPAddress ip   = currentIP();
-  int       lpuv = getLedsPerUniverse();
-  int       upo  = max(1, min(4, (settings.numLedsPerOutput + lpuv - 1) / lpuv));
+  IPAddress ip  = currentIP();
+  int       upo = getUniversesPerOutput();
 
   String c;
   c.reserve(12000);
@@ -1500,7 +1634,7 @@ void handleRoot() {
   rowEnd(c);
 
   rowStart(c, F("Universes per output"),
-           F("One universe carries 170 pixels in RGB, 128 in RGBW or 102 in RGBWW. "
+           F("One universe carries 170 fixtures in RGB, 128 in RGBW or 102 in RGBWW. "
              "Outputs always begin on a universe boundary, so this is set in whole "
              "universes."),
            "uniSlider");
@@ -1508,6 +1642,17 @@ void handleRoot() {
   c += F("<input type='hidden' id='numledsoutput' name='numledsoutput' value='");
   c += String(settings.numLedsPerOutput);
   c += F("'>");
+  rowEnd(c);
+
+  rowStart(c, F("Pixels per fixture"),
+           F("How many LEDs move together as one addressable fixture. At 1 every "
+             "LED is its own fixture. Higher values drive the same strips from a "
+             "smaller patch — the console addresses the fixtures and the node "
+             "copies each one across its LEDs."),
+           "grpSlider");
+  slider(c, "groupsize", "grpSlider", 1, MAX_GROUP_SIZE, getGroupSize(), "grpVal",
+         String(), true);
+  c += F("<p class='hint' id='grpHint'></p>");
   rowEnd(c);
 
   rowStart(c, F("Outputs in use"),
@@ -1642,6 +1787,7 @@ void handleConfig() {
   if (server.hasArg("protocolMode"))  settings.protocolMode     = server.arg("protocolMode").toInt();
   if (server.hasArg("numledsoutput")) settings.numLedsPerOutput = server.arg("numledsoutput").toInt();
   if (server.hasArg("numoutput"))     settings.numOutputs       = server.arg("numoutput").toInt();
+  if (server.hasArg("groupsize"))     settings.groupSize        = server.arg("groupsize").toInt();
   if (server.hasArg("startuniverse"))  settings.startUniverse   = server.arg("startuniverse").toInt();
   if (server.hasArg("nodename"))      settings.nodeName         = server.arg("nodename");
   if (server.hasArg("ledbrightness")) settings.ledBrightness    = server.arg("ledbrightness").toInt();
@@ -1661,12 +1807,18 @@ void handleConfig() {
   } else if (server.hasArg("channelMode")) {
     int newMode = server.arg("channelMode").toInt();
     if (newMode < CHANNEL_MODE_RGB || newMode > CHANNEL_MODE_RGBWW) newMode = CHANNEL_MODE_RGB;
-    if (settings.channelMode != newMode) {
-      settings.channelMode = newMode;
-      int maxLeds = getMaxLedsPerStrip();
-      if (settings.numLedsPerOutput > maxLeds) settings.numLedsPerOutput = maxLeds;
-    }
+    settings.channelMode = newMode;
   }
+
+  // The page derives these, but a hand-made POST need not have. Clamp here so
+  // what reaches NVS is always something the node can actually drive.
+  if (settings.groupSize < 1)              settings.groupSize = 1;
+  if (settings.groupSize > MAX_GROUP_SIZE) settings.groupSize = MAX_GROUP_SIZE;
+  if (settings.numOutputs < 1)             settings.numOutputs = 1;
+  if (settings.numOutputs > NUMSTRIPS)     settings.numOutputs = NUMSTRIPS;
+  if (settings.numLedsPerOutput < 1)       settings.numLedsPerOutput = 1;
+  if (settings.numLedsPerOutput > getMaxLedsPerStrip())
+    settings.numLedsPerOutput = getMaxLedsPerStrip();
 
   // Interface. The page posts "link" (0 = Ethernet, 1 = Wi-Fi); the older
   // "useWiFi" checkbox is still honoured so an existing bookmark keeps working.
