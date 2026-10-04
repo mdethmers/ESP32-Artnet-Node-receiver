@@ -78,12 +78,7 @@ All LEDs based on the wsXXXX and clocked LED series are supported. These can be 
 ## WLED
 Check this [youtube video](https://www.youtube.com/watch?v=f3e7oMOB8D4) on how to install WLED!
 
-This controller also supports the WLED software (WIFI ONLY!), supporting Artnet, DMX, and Standalone animations. When using multiple nodes, these can sync over WIFI in standalone mode. Install WLED through the [Web Installer](https://install.wled.me/) (plain version!).
-In the WLED folder, you can find a [WLED config file](WLED/wled_cfg.json) that works with the controller, which you can use to receive the correct pin settings. Upload these in the security and update pagae > Restore configuration. This config file is set to 680 LEDs per pin, using a 10A power supply, and with WS2814/SK6912 type leds. CHANGE THESE ACCORDING TO YOUR OWN SETUP!
-
-The W5500 Ethernet module and OLED screen can work with WLED:
-- W5500 capable version of WLED is available here and should work (Not tested): https://github.com/stcalica/WLED-W500
-- 128x32 OLED 4-line display mod available as well (Not tested): https://mm.kno.wled.ge/usermods/4LineDisplay/#installation_1
+I have forked WLED from the MoonModules project, and have gotten it to work with the W5500 and OLED screen on the node. If you desperately need WLED to work on the node, check out this repo: [W5500_WLED](https://github.com/mdethmers/W5500_WLED)
 
 ### WLED ARTNET / sACN (E1.31)
 To get Artnet to work on your WLED install, go to SYNC settings and set your network DMX input to Artnet or sACN (E1.31), and DMX mode to Multi-RGB. Make sure to reboot. 
