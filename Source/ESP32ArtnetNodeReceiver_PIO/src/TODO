@@ -1,0 +1,5 @@
+# Only use ClocklessSmartLED lib
+    - use it as well for the status LED
+    - use it also for test/cycle pattern
+
+#make clock pin editable via config

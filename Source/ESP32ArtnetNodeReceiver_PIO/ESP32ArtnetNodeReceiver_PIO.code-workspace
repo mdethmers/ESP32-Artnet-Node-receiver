@@ -1,0 +1,9 @@
+{
+	"folders": [
+		{
+			"name": "ESP32ArtnetNodeReceiver_PIO",
+			"path": ".."
+		}
+	],
+	"settings": {}
+}

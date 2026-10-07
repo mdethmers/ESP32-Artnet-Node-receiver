@@ -21,6 +21,16 @@
 #define _ETHERNET_WEBSERVER_LOGLEVEL_ 1
 #define UNIQUE_SUBARTNET
 
+// ─── Firmware Version ─────────────────────────────────────────────────────────
+#define FIRMWARE_VERSION_MAJOR  0
+#define FIRMWARE_VERSION_MINOR  4
+#define FIRMWARE_VERSION_BUILD  1
+
+//Reminded Do not put any 'leading 0' in a #define because it would be interpreted as octal value
+#define FIRMWARE_BUILD_DAY      27
+#define FIRMWARE_BUILD_MONTH    9
+#define FIRMWARE_VERSION_YEAR   2026
+
 // ─── LED configuration ────────────────────────────────────────────────────────
 #define MAX_LEDS_RGB          680   // 170 LEDs × 4 universes  (3 ch)
 #define MAX_LEDS_RGBW         512   // 128 LEDs × 4 universes  (4 ch)
@@ -147,6 +157,9 @@ struct Settings {
   // socket and a second parse of every frame — overhead a node earns only if
   // the console actually sends sACN.
   int     protocolMode       = PROTOCOL_ARTNET;  // 0=ArtNet, 1=sACN, 2=Both
+
+  //Define if we want to ratotate OLED screen by 180 degrees
+  bool screenRotation = false;
 
   // Convenience helpers -------------------------------------------------------
   bool isRGBW()   const { return channelMode == CHANNEL_MODE_RGBW;  }
@@ -947,6 +960,8 @@ void loadSettings() {
   settings.white2Level       = preferences.getInt("white2Level",     settings.white2Level);
   settings.ledType           = preferences.getInt("ledType",         settings.ledType);
   settings.protocolMode      = preferences.getInt("protocolMode",    settings.protocolMode);
+  settings.screenRotation    = preferences.getBool("screenRotation", settings.screenRotation) ;
+
   // Absent on a node upgraded from older firmware, which is exactly the
   // ungrouped behaviour it had before.
   settings.groupSize         = preferences.getInt("groupSize",       1);
@@ -1001,6 +1016,7 @@ void saveSettings() {
   preferences.putInt("ledType",         settings.ledType);
   preferences.putInt("protocolMode",    settings.protocolMode);
   preferences.putInt("groupSize",       settings.groupSize);
+  preferences.putBool("screenRotation", settings.screenRotation);
 
   for (int i = 0; i < NUMSTRIPS; i++) {
     char key[10]; sprintf(key, "pin%d", i);
@@ -1037,6 +1053,8 @@ void displayStatus(const String& line1, const String& line2, const String& line3
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
+  if(settings.screenRotation)
+    display.setRotation(2);
   display.setCursor(0, 0);  display.println(line1);
   if (line2.length()) { display.setCursor(0,  9); display.println(line2); }
   if (line3.length()) { display.setCursor(0, 18); display.println(line3); }
@@ -1462,6 +1480,10 @@ static void slider(String& c, const char* name, const char* id, int lo, int hi,
 void handleRoot() {
   IPAddress ip  = currentIP();
   int       upo = getUniversesPerOutput();
+  
+  char tbuf[12] = {0};
+
+  snprintf(tbuf, sizeof(tbuf),"%d.%d.%d", FIRMWARE_VERSION_MAJOR, FIRMWARE_VERSION_MINOR, FIRMWARE_VERSION_BUILD);
 
   String c;
   c.reserve(12000);
@@ -1482,6 +1504,14 @@ void handleRoot() {
   c += (settings.protocolMode == PROTOCOL_ARTNET) ? F("Art-Net")
      : (settings.protocolMode == PROTOCOL_SACN)   ? F("sACN")
                                                   : F("Art-Net + sACN");
+  c += F(" &middot; ");
+  c += F("Firmware : ");
+  c += String(tbuf);
+  c += F(" (Build date :");  
+  snprintf(tbuf, sizeof(tbuf),"%02d/%02d/%02d", FIRMWARE_BUILD_DAY, FIRMWARE_BUILD_MONTH, FIRMWARE_VERSION_YEAR);
+  c += String(tbuf) ;
+  c += F(")");
+
   c += F("</p></div>"
          "<button type='button' id='theme' class='icon lg' aria-label='Switch theme'></button>"
          "</header>");
@@ -1605,7 +1635,14 @@ void handleRoot() {
   c += attrEscape(settings.gateway);
   c += F("'>");
   rowEnd(c);
-  c += F("</div></section>");
+  c += F("</div>");
+
+  rowStart(c, F("Screen rotation"),
+           F("Allow you to rotate the screen display by 180° in case the Node is fixed upside-down."),
+           "screenRotation");
+  toggleSwitch(c, "screenRotation", "screenRotation", settings.screenRotation);
+  rowEnd(c);
+  c += F("</section>");
 
   // ── Patch ─────────────────────────────────────────────────────────────────
   c += F("<section class='panel'><div class='legend'>Patch</div>");
@@ -1784,18 +1821,21 @@ void handleRoot() {
 // ─── Config POST handler ──────────────────────────────────────────────────────
 void handleConfig() {
   if (server.method() != HTTP_POST) return;
-  if (server.hasArg("protocolMode"))  settings.protocolMode     = server.arg("protocolMode").toInt();
-  if (server.hasArg("numledsoutput")) settings.numLedsPerOutput = server.arg("numledsoutput").toInt();
-  if (server.hasArg("numoutput"))     settings.numOutputs       = server.arg("numoutput").toInt();
-  if (server.hasArg("groupsize"))     settings.groupSize        = server.arg("groupsize").toInt();
-  if (server.hasArg("startuniverse"))  settings.startUniverse   = server.arg("startuniverse").toInt();
-  if (server.hasArg("nodename"))      settings.nodeName         = server.arg("nodename");
-  if (server.hasArg("ledbrightness")) settings.ledBrightness    = server.arg("ledbrightness").toInt();
-  if (server.hasArg("ssid"))          settings.ssid             = server.arg("ssid");
-  if (server.hasArg("password"))      settings.password         = server.arg("password");
-  if (server.hasArg("staticColor"))   settings.staticColor      = server.arg("staticColor");
-  if (server.hasArg("whiteLevel"))    settings.whiteLevel       = server.arg("whiteLevel").toInt();
-  if (server.hasArg("white2Level"))   settings.white2Level      = server.arg("white2Level").toInt();
+  if (server.hasArg("protocolMode"))    settings.protocolMode       = server.arg("protocolMode").toInt();
+  if (server.hasArg("numledsoutput"))   settings.numLedsPerOutput   = server.arg("numledsoutput").toInt();
+  if (server.hasArg("numoutput"))       settings.numOutputs         = server.arg("numoutput").toInt();
+  if (server.hasArg("groupsize"))       settings.groupSize          = server.arg("groupsize").toInt();
+  if (server.hasArg("startuniverse"))   settings.startUniverse      = server.arg("startuniverse").toInt();
+  if (server.hasArg("nodename"))        settings.nodeName           = server.arg("nodename");
+  if (server.hasArg("ledbrightness"))   settings.ledBrightness      = server.arg("ledbrightness").toInt();
+  if (server.hasArg("ssid"))            settings.ssid               = server.arg("ssid");
+  if (server.hasArg("password"))        settings.password           = server.arg("password");
+  if (server.hasArg("staticColor"))     settings.staticColor        = server.arg("staticColor");
+  if (server.hasArg("whiteLevel"))      settings.whiteLevel         = server.arg("whiteLevel").toInt();
+  if (server.hasArg("white2Level"))     settings.white2Level        = server.arg("white2Level").toInt();
+
+  //get back screen rottaion Param
+  settings.screenRotation = server.hasArg("screenRotation");
 
   // LED type
   if (server.hasArg("ledType"))

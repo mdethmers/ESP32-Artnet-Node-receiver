@@ -1,0 +1,30 @@
+[submodule "Source/ESP32ArtnetNodeReceiver_PIO/lib/Adafruit_BusIO"]
+	path = Source/ESP32ArtnetNodeReceiver_PIO/lib/Adafruit_BusIO
+	url = https://github.com/adafruit/Adafruit_BusIO.git
+[submodule "Source/ESP32ArtnetNodeReceiver_PIO/lib/Adafruit-GFX-Library"]
+	path = Source/ESP32ArtnetNodeReceiver_PIO/lib/Adafruit-GFX-Library
+	url = https://github.com/adafruit/Adafruit-GFX-Library.git
+[submodule "Source/ESP32ArtnetNodeReceiver_PIO/lib/WebServer_ESP32_W5500"]
+	path = Source/ESP32ArtnetNodeReceiver_PIO/lib/WebServer_ESP32_W5500
+	url = https://github.com/khoih-prog/WebServer_ESP32_W5500.git
+[submodule "Source/ESP32ArtnetNodeReceiver_PIO/lib/I2SClocklessLedDriver"]
+	path = Source/ESP32ArtnetNodeReceiver_PIO/lib/I2SClocklessLedDriver
+	url = https://github.com/hpwit/I2SClocklessLedDriver.git
+[submodule "Source/ESP32ArtnetNodeReceiver_PIO/lib/artnetesp32v2"]
+	path = Source/ESP32ArtnetNodeReceiver_PIO/lib/artnetesp32v2
+	url = https://github.com/mdethmers/artnetesp32v2.git
+[submodule "Source/ESP32ArtnetNodeReceiver_PIO/lib/Adafruit_NeoPixel"]
+	path = Source/ESP32ArtnetNodeReceiver_PIO/lib/Adafruit_NeoPixel
+	url = https://github.com/adafruit/Adafruit_NeoPixel.git
+[submodule "Source/ESP32ArtnetNodeReceiver_PIO/lib/Adafruit_SSD1306"]
+	path = Source/ESP32ArtnetNodeReceiver_PIO/lib/Adafruit_SSD1306
+	url = https://github.com/adafruit/Adafruit_SSD1306.git
+[submodule "Source/ESP32ArtnetNodeReceiver_PIO/lib/I2SAPA102"]
+	path = Source/ESP32ArtnetNodeReceiver_PIO/lib/I2SAPA102
+	url = https://github.com/hpwit/I2SAPA102.git
+[submodule "Source/ESP32ArtnetNodeReceiver_PIO/lib/FastLED"]
+	path = Source/ESP32ArtnetNodeReceiver_PIO/lib/FastLED
+	url = https://github.com/FastLED/FastLED.git
+[submodule "Source/ESP32ArtnetNodeReceiver_PIO/lib/sarmfsw"]
+	path = Source/ESP32ArtnetNodeReceiver_PIO/lib/sarmfsw
+	url = https://github.com/SMFSW/sarmfsw.git
