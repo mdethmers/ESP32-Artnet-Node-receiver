@@ -8,6 +8,8 @@
  *   - OLED status display, NeoPixel status LED, boot-button mode cycling
  *   - OTA firmware update page
  *   - Persistent settings in NVS (Preferences)
+ *   - Firmware version as the last stop of the button menu and on the web page
+ *   - OLED can be flipped 180° from the web page for upside-down mounting
  *
  * Channel modes: 0 = RGB (3ch), 1 = RGBW (4ch), 2 = RGBWW/CCT (5ch)
  *
@@ -20,6 +22,13 @@
 #define DEBUG_ETHERNET_WEBSERVER_PORT Serial
 #define _ETHERNET_WEBSERVER_LOGLEVEL_ 1
 #define UNIQUE_SUBARTNET
+
+// ─── Firmware version ─────────────────────────────────────────────────────────
+// Bump this with every release. It is shown on the OLED as the last stop of
+// the button menu and in the web interface. The build date comes from the
+// compiler, so it never needs editing by hand.
+#define FIRMWARE_VERSION      "1.0.0"
+#define FIRMWARE_BUILD_DATE   __DATE__
 
 // ─── LED configuration ────────────────────────────────────────────────────────
 #define MAX_LEDS_RGB          680   // 170 LEDs × 4 universes  (3 ch)
@@ -96,6 +105,7 @@ void resetToDefaultPins();
 void updateStripPins();
 void displayStatus(const String& line1, const String& line2 = "", const String& line3 = "", const String& line4 = "", bool showWiFiIcon = false);
 void displayConnectionStatus(const String& type, int remainingTime = -1);
+void displayVersionScreen();
 void drawWiFiIcon(int x, int y);
 void handleOTAUpdate();
 void handleDoUpdate();
@@ -133,7 +143,7 @@ struct Settings {
   String  staticIP          = "192.168.1.100";
   String  gateway           = "192.168.1.1";
   String  subnet            = "255.255.255.0";
-  int     networkMode       = 0;   // 0=Ethernet 1=WiFi 2=AP 3=RGB-test 4=Static
+  int     networkMode       = 0;   // 0=Ethernet 1=WiFi 2=AP 3=RGB-test 4=Static 5=Info
   int     channelMode       = CHANNEL_MODE_RGB; // 0=RGB, 1=RGBW, 2=RGBWW
   // How many physical LEDs act as one addressable fixture. 1 = every LED is its
   // own fixture (the original behaviour). Higher values cut the patch by the
@@ -147,6 +157,8 @@ struct Settings {
   // socket and a second parse of every frame — overhead a node earns only if
   // the console actually sends sACN.
   int     protocolMode       = PROTOCOL_ARTNET;  // 0=ArtNet, 1=sACN, 2=Both
+  // Rotate the OLED 180° for a node mounted upside-down. Applied once at boot.
+  bool    screenRotation     = false;
 
   // Convenience helpers -------------------------------------------------------
   bool isRGBW()   const { return channelMode == CHANNEL_MODE_RGBW;  }
@@ -622,9 +634,15 @@ void setup() {
   if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
     Serial.println(F("SSD1306 allocation failed"));
   }
-  displayStatus("Initializing...");
 
   loadSettings();
+
+  // Orientation is a persisted setting, so it has to wait for loadSettings().
+  // Set once here; every later redraw inherits it.
+  display.setRotation(settings.screenRotation ? 2 : 0);
+
+  Serial.println("Firmware v" FIRMWARE_VERSION " (built " FIRMWARE_BUILD_DATE ")");
+  displayStatus("Initializing...");
 
   // Enforce LED count limits
   int maxLeds = getMaxLedsPerStrip();
@@ -744,6 +762,9 @@ void setup() {
     case 4:
       displayStatus("Static Color Mode", "Color: " + settings.staticColor, "Press button to exit");
       return;
+    case 5:
+      displayVersionScreen();
+      return;
     default: setupEthernet(); break;
   }
 
@@ -808,8 +829,8 @@ void setup() {
 void loop() {
   checkBootButton();
 
-  // Standalone LED modes (no network)
-  if (settings.networkMode == 3 || settings.networkMode == 4) {
+  // Standalone modes (no network). Mode 5 only holds the version screen.
+  if (settings.networkMode == 3 || settings.networkMode == 4 || settings.networkMode == 5) {
     if (settings.networkMode == 3 && settings.ledCycleEnabled) {
       if (settings.randomFadeEnabled) randomFadeLEDs();
       else cycleLEDs();
@@ -947,6 +968,7 @@ void loadSettings() {
   settings.white2Level       = preferences.getInt("white2Level",     settings.white2Level);
   settings.ledType           = preferences.getInt("ledType",         settings.ledType);
   settings.protocolMode      = preferences.getInt("protocolMode",    settings.protocolMode);
+  settings.screenRotation    = preferences.getBool("screenRotation", settings.screenRotation);
   // Absent on a node upgraded from older firmware, which is exactly the
   // ungrouped behaviour it had before.
   settings.groupSize         = preferences.getInt("groupSize",       1);
@@ -1001,6 +1023,7 @@ void saveSettings() {
   preferences.putInt("ledType",         settings.ledType);
   preferences.putInt("protocolMode",    settings.protocolMode);
   preferences.putInt("groupSize",       settings.groupSize);
+  preferences.putBool("screenRotation", settings.screenRotation);
 
   for (int i = 0; i < NUMSTRIPS; i++) {
     char key[10]; sprintf(key, "pin%d", i);
@@ -1048,6 +1071,14 @@ void displayStatus(const String& line1, const String& line2, const String& line3
 void displayConnectionStatus(const String& type, int remainingTime) {
   String line2 = (remainingTime >= 0) ? "Timeout in: " + String(remainingTime) + "s" : "";
   displayStatus("Waiting for " + type, line2);
+}
+
+// Mode 5, the last stop of the button menu. The node rests here until the
+// next press wraps the menu round to Ethernet.
+void displayVersionScreen() {
+  displayStatus("ESP32 Art-Net Node",
+                "Firmware v" FIRMWARE_VERSION,
+                "Built " FIRMWARE_BUILD_DATE);
 }
 
 // ─── Status LED ───────────────────────────────────────────────────────────────
@@ -1184,13 +1215,14 @@ void checkBootButton() {
       state.selectedColorIndex = (state.selectedColorIndex + 1) % PRESET_COLORS_COUNT;
       state.isStaticColorSet   = false;
     } else {
-      settings.networkMode = (settings.networkMode + 1) % 5;
+      settings.networkMode = (settings.networkMode + 1) % 6;
       switch (settings.networkMode) {
         case 0: settings.useWiFi=false; settings.ledCycleEnabled=false; settings.enStatColor=false; displayStatus("Switching Mode...","Ethernet"); break;
         case 1: settings.useWiFi=true;  settings.ledCycleEnabled=false; settings.enStatColor=false; displayStatus("Switching Mode...","Wi-Fi");    break;
         case 2: settings.useWiFi=false; settings.ledCycleEnabled=false; settings.enStatColor=false; displayStatus("Switching Mode...","AP Mode");   break;
         case 3: settings.ledCycleEnabled=true;  settings.enStatColor=false; displayStatus("Switching Mode...","RGB Test Cycle"); break;
         case 4: settings.ledCycleEnabled=false; settings.enStatColor=true;  displayStatus("Switching Mode...","Static Color");   break;
+        case 5: settings.ledCycleEnabled=false; settings.enStatColor=false; displayStatus("Switching Mode...","Firmware Info");  break;
       }
       saveSettings(); delay(1000); ESP.restart();
     }
@@ -1482,6 +1514,7 @@ void handleRoot() {
   c += (settings.protocolMode == PROTOCOL_ARTNET) ? F("Art-Net")
      : (settings.protocolMode == PROTOCOL_SACN)   ? F("sACN")
                                                   : F("Art-Net + sACN");
+  c += F(" &middot; v" FIRMWARE_VERSION);
   c += F("</p></div>"
          "<button type='button' id='theme' class='icon lg' aria-label='Switch theme'></button>"
          "</header>");
@@ -1706,6 +1739,13 @@ void handleRoot() {
          String(settings.ledBrightness));
   rowEnd(c);
 
+  rowStart(c, F("Flip the display"),
+           F("Turns the OLED through 180° for a node that is mounted upside-down. "
+             "Takes effect after the restart that follows saving."),
+           "screenRotation");
+  toggleSwitch(c, "screenRotation", "screenRotation", settings.screenRotation);
+  rowEnd(c);
+
   c += F("<details><summary>Data pins");
   tipButton(c, F("Change these only if your board wires the outputs differently. "
                  "The defaults match the standard build."));
@@ -1842,6 +1882,7 @@ void handleConfig() {
   bool wasCustom = settings.enableCustomPins;
   settings.enableCustomPins = server.hasArg("enableCustomPins");
   settings.useStaticIP      = server.hasArg("useStaticIP");
+  settings.screenRotation   = server.hasArg("screenRotation");
   if (server.hasArg("staticIP")) { settings.staticIP = server.arg("staticIP"); settings.staticIP.trim(); }
   if (server.hasArg("gateway"))  { settings.gateway  = server.arg("gateway");  settings.gateway.trim();  }
   if (server.hasArg("subnet"))   { settings.subnet   = server.arg("subnet");   settings.subnet.trim();   }
@@ -1940,6 +1981,7 @@ void handleOTAUpdate() {
   c += F("<header class='masthead'><span class='dot'></span><div class='id'>"
          "<h1>Firmware update</h1><p class='readout'>");
   c += attrEscape(settings.nodeName);
+  c += F(" &middot; running v" FIRMWARE_VERSION);
   c += F("</p></div>"
          "<button type='button' id='theme' class='icon lg' aria-label='Switch theme'></button>"
          "</header>"
