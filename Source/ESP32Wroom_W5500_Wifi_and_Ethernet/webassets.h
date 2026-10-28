@@ -7,7 +7,7 @@
 // not understand C++11 raw string literals — it reads the JavaScript inside
 // them as C++ and emits prototypes for it, which then fail to compile.
 
-#define ASSET_VER "2"
+#define ASSET_VER "3"
 
 // Colours follow the node's own signal language: amber is anything you can act
 // on (the status LED and a venue worklight are both amber), green is live,
@@ -351,8 +351,10 @@ D.addEventListener('DOMContentLoaded',function(){
     try{localStorage.setItem('theme',d?'dark':'light')}catch(e){}
     paintTheme()});
 
+  /* The node only polls the network when this page asks it to, so ask once
+     on load; the server-rendered list may be stale or empty until then. */
   var rb=$('#reload');
-  if(rb){rb.innerHTML=ARROWS;rb.addEventListener('click',refresh)}
+  if(rb){rb.innerHTML=ARROWS;rb.addEventListener('click',refresh);refresh()}
 
   var f=$('#cfg');
   if(f){

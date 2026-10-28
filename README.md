@@ -58,7 +58,7 @@ EasyEDA Editor: https://easyeda.com/editor#project_id=86fd5b1121594bfa85fd2c5eed
   - **Preferences** https://www.arduino.cc/reference/en/libraries/preferences/
   - **WebServer_ESP32_W5500** https://github.com/khoih-prog/WebServer_ESP32_W5500
   - **I2SClocklessLedDriver** https://github.com/hpwit/I2SClocklessLedDriver
-  - **FORKED artnetESP32V2** https://github.com/mdethmers/artnetesp32v2
+  - **FORKED artnetESP32V2** https://github.com/mdethmers/artnetesp32v2 (version 1.1.0 or newer; firmware 1.1.0 needs the per-universe frame assembly and counters added there)
   - WebServer.h (For Wi-Fi and web interface support)
   - Adafruit_NeoPixel.h (For addressable LED control)
   - SPI.h, Wire.h (Built-in libraries for communication)
@@ -89,7 +89,7 @@ In LED preferences, set the number of LEDs to the number of universes you need (
 
 ## Access the Web Interface:
 - After uploading the code, connect your ESP32 to a network using the W5500 Ethernet module.
-- Set core debug level to "info" for extra information on performance
+- Build with Tools > Core Debug Level set to **None**. The node prints its own receive and frame counters every 5 seconds regardless. "Info" adds the library's boot-time details (buffer allocation, multicast joins) but logs from the network path cost real throughput at high universe counts, so leave it on None for a show.
 - Find the IP address assigned to the ESP32 and open it in a web browser.
   - To find the IP address easily, use Resolume's advanced output. It will autodetect the Artnet node.
  

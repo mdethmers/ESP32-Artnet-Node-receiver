@@ -21,13 +21,16 @@
 // ─── Feature flags ────────────────────────────────────────────────────────────
 #define DEBUG_ETHERNET_WEBSERVER_PORT Serial
 #define _ETHERNET_WEBSERVER_LOGLEVEL_ 1
-#define UNIQUE_SUBARTNET
+
+// Print receive and frame counters on the serial port every 5 s. Cheap: one
+// line from loop(), nothing in the network path. Set to 0 to silence it.
+#define ARTNET_STATS 1
 
 // ─── Firmware version ─────────────────────────────────────────────────────────
 // Bump this with every release. It is shown on the OLED as the last stop of
 // the button menu and in the web interface. The build date comes from the
 // compiler, so it never needs editing by hand.
-#define FIRMWARE_VERSION      "1.0.0"
+#define FIRMWARE_VERSION      "1.1.0"
 #define FIRMWARE_BUILD_DATE   __DATE__
 
 // ─── LED configuration ────────────────────────────────────────────────────────
@@ -180,9 +183,12 @@ struct NetConfig {
 // ─── Discovered ArtNet nodes ──────────────────────────────────────────────────
 // Filled in from ArtPollReply packets. Written from the lwIP receive context
 // and read while rendering the config page, so access is spinlock-guarded.
+//
+// The node never polls on a timer. Replies are broadcast, so every poll the
+// console sends keeps this table fresh for free; the web page polls once when
+// it opens and once per refresh click, and that is the only polling we do.
 #define MAX_DISCOVERED_NODES   32
 #define NODE_EXPIRY_MS         15000UL   // drop a node after ~3 missed polls
-#define ARTPOLL_INTERVAL_MS     4000UL
 #define ARTPOLLREPLY_NAME_OFF   26       // short_name[18] offset in the reply
 
 struct DiscoveredNode {
@@ -238,22 +244,23 @@ Adafruit_NeoPixel  StatusLed(1, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
 WebServer          server(80);
 Preferences        preferences;
 artnetESP32V2      artnet = artnetESP32V2();
+subArtnet         *patch  = nullptr;     // the one patch this node listens on
 
 // WS2812 driver + raw byte buffer
 // MAX_LEDS_RGB is the largest possible count (RGB mode), so size the buffer for that.
 I2SClocklessLedDriver driver;
 uint8_t ledData[NUMSTRIPS * MAX_LEDS_RGB * 5]; // worst-case: 5 bytes per LED (RGBWW)
 
-// Grouped output writes an expanded frame instead of handing the network buffer
-// straight to the driver, and showPixels(NO_WAIT) keeps reading that frame while
-// the next one arrives. Two buffers, used alternately, keep the transfer in
-// progress away from the frame being built. The second one is only allocated
-// when grouping is actually switched on; ungrouped nodes pay nothing for it.
-// If the allocation fails we fall back to one buffer and a blocking show, which
-// is slower but never tears.
-uint8_t    *ledFrames[2]   = { ledData, ledData };
-uint8_t     ledFrameIdx    = 0;
-DisplayMode groupShowMode  = NO_WAIT;
+// The Art-Net callback always shows with WAIT, never NO_WAIT. The driver's
+// NO_WAIT path waits for a running transfer with a timeout it sizes at the
+// bare transfer time, so a frame that arrives while the strips are still being
+// clocked can restart the hardware a hair before it finishes. The strips then
+// never see the latch gap and stop updating; the driver's bookkeeping also
+// goes stale so every later call does the same. That is the "stutters, then
+// 1 fps" failure. WAIT blocks the callback task, which exists for nothing
+// else, until the frame is on the wire. A frame that arrives in the meantime
+// is simply replaced by a newer one. Because WAIT returns only after the
+// buffer has been fully read, grouped output needs just one frame buffer.
 
 // APA102 driver + CRGB buffer
 I2SAPA102 controller(0);
@@ -261,6 +268,12 @@ CRGB      leds[NUMSTRIPS * MAX_LEDS_RGB];      // FastLED CRGB array for APA102
 
 Settings settings;
 State    state;
+
+// Raised by the config handler before it writes a single setting. The Art-Net
+// LED task runs on the other core and reads settings on every frame; without
+// this it can pick up a half-applied change (say a new strip type whose driver
+// only exists after the restart) and call into a driver that was never set up.
+volatile bool outputFrozen = false;
 
 DiscoveredNode discoveredNodes[MAX_DISCOVERED_NODES];
 portMUX_TYPE   nodeTableMux = portMUX_INITIALIZER_UNLOCKED;
@@ -456,6 +469,8 @@ void setAllLeds(uint8_t r, uint8_t g, uint8_t b, uint8_t w1, uint8_t w2) {
 // pointer advances by that stride and any unused tail of an output's last
 // universe is simply skipped.
 void displayfunction(void *param) {
+  if (outputFrozen) return;            // settings are being rewritten for a restart
+
   subArtnet *subartnet = (subArtnet *)param;
 
   const int group = getGroupSize();
@@ -495,8 +510,9 @@ void displayfunction(void *param) {
 
   } else if (group == 1) {
     // WS2812 — pass raw buffer directly (works for RGB, RGBW and RGBWW
-    // because the driver was initialised with the correct colour arrangement)
-    driver.showPixels(NO_WAIT, subartnet->data);
+    // because the driver was initialised with the correct colour arrangement).
+    // WAIT: see the note above ledData.
+    driver.showPixels(WAIT, subartnet->data);
 
   } else {
     const int ch       = getChannelsPerLed();
@@ -504,13 +520,11 @@ void displayfunction(void *param) {
     const int fixtures = getFixturesPerOutput();
     const int outBytes = settings.numLedsPerOutput * ch;   // driver's strip pitch
 
-    // Outputs not in use are never written and stay at the zero the buffers were
+    // Outputs not in use are never written and stay at the zero the buffer was
     // cleared to at boot.
-    uint8_t *frame = ledFrames[ledFrameIdx];
-
     for (int out = 0; out < settings.numOutputs; out++) {
       const uint8_t *block = subartnet->data + out * stride;
-      uint8_t       *dst   = frame           + out * outBytes;
+      uint8_t       *dst   = ledData         + out * outBytes;
 
       for (int f = 0; f < fixtures; f++) {
         const uint8_t *fx = block + f * ch;
@@ -522,8 +536,7 @@ void displayfunction(void *param) {
       }
     }
 
-    driver.showPixels(groupShowMode, frame);
-    if (ledFrames[1] != ledFrames[0]) ledFrameIdx ^= 1;
+    driver.showPixels(WAIT, ledData);
   }
 }
 
@@ -730,22 +743,8 @@ void setup() {
     // a rogue full-white first LED when ArtNet data starts arriving.
     memset(ledData, 0, sizeof(ledData));
 
-    // Grouped output builds each frame itself, so it needs somewhere to build
-    // the next one while the driver is still clocking out the last. Claimed
-    // before the Art-Net buffers, which take whatever heap is left over.
-    if (getGroupSize() > 1) {
-      uint8_t *second = (uint8_t *)calloc(sizeof(ledData), 1);
-      if (second) {
-        ledFrames[1]  = second;
-        groupShowMode = NO_WAIT;
-        Serial.printf("Grouping x%d — double-buffered\n", getGroupSize());
-      } else {
-        // One buffer left: block until the frame is on the wire before the next
-        // one overwrites it. Costs the callback task the transmit time.
-        groupShowMode = WAIT;
-        Serial.println("Grouping — second frame buffer unavailable, using blocking show");
-      }
-    }
+    if (getGroupSize() > 1)
+      Serial.printf("Grouping x%d\n", getGroupSize());
   }
 
   // ── Networking ────────────────────────────────────────────────────────────
@@ -790,12 +789,23 @@ void setup() {
     // output starts on the following universe boundary. Without grouping this
     // is the same number as before: numLedsPerOutput is always a whole number
     // of universes there.
-    artnet.addSubArtnet(
+    patch = artnet.addSubArtnet(
       settings.startUniverse,
       settings.numOutputs * universesPerOutput * universeSize,
       universeSize,
       &displayfunction
     );
+    // Fewer than two buffers means the strips can be read while the next
+    // frame is written over them. Worth knowing at boot, not at the show.
+    if (!patch) {
+      Serial.println("ERROR: could not create the Art-Net patch (out of heap)");
+    } else {
+      Serial.printf("Art-Net patch: universes %d-%d, %u frame buffers of %u bytes, free heap %u\n",
+                    patch->startUniverse, patch->endUniverse - 1,
+                    patch->nbOfBuffers, (unsigned)patch->frameBytes, ESP.getFreeHeap());
+      if (patch->nbOfBuffers < 2)
+        Serial.println("WARNING: only one frame buffer — output may tear under load");
+    }
     artnet.setNodeName(settings.nodeName);
     artnet.setPollReplyCallback(onArtPollReply);
 
@@ -909,14 +919,28 @@ void loop() {
     }
   }
 
-  // ── Node discovery: ask who else is out there every few seconds ──────────
-  if (!state.isAPMode && (settings.networkMode == 0 || settings.networkMode == 1)) {
-    static unsigned long lastPoll = 0;
-    if (millis() - lastPoll >= ARTPOLL_INTERVAL_MS) {
-      lastPoll = millis();
-      artnet.sendArtPoll();
+#if ARTNET_STATS
+  // ── Receive and frame counters, every 5 s ────────────────────────────────
+  // rx: data packets taken; foreign: universes not patched here; locked: a
+  // second sender was ignored; bad: not Art-Net / too short; qfull: the
+  // assembly task fell behind. frames: shipped to the strips; partial: shipped
+  // before every universe arrived; skipped: a newer frame was already waiting;
+  // lost: show queue full. Steady zeros on the right-hand side are the goal.
+  if (!state.isAPMode && patch) {
+    static unsigned long lastStats = 0;
+    if (millis() - lastStats >= 5000UL) {
+      lastStats = millis();
+      Serial.printf("[artnet] rx=%lu foreign=%lu locked=%lu bad=%lu qfull=%lu polls=%lu/%lu | "
+                    "frames=%d partial=%d skipped=%d lost=%d | heap=%u min=%u\n",
+                    (unsigned long)artnetStats.dmx, (unsigned long)artnetStats.foreign,
+                    (unsigned long)artnetStats.locked, (unsigned long)artnetStats.malformed,
+                    (unsigned long)artnetStats.queueFull,
+                    (unsigned long)artnetStats.polls, (unsigned long)artnetStats.pollReplies,
+                    patch->nb_frames, patch->nb_frames_partial, patch->nb_frame_double,
+                    patch->nb_frames_lost, ESP.getFreeHeap(), ESP.getMinFreeHeap());
     }
   }
+#endif
 
   // ── LED output priority: randomFade > staticColor > ledCycle ─────────────
   if (settings.randomFadeEnabled) {
@@ -1824,6 +1848,13 @@ void handleRoot() {
 // ─── Config POST handler ──────────────────────────────────────────────────────
 void handleConfig() {
   if (server.method() != HTTP_POST) return;
+
+  // Stop the LED task reading settings before any of them change. A frame
+  // already inside displayfunction finishes on the old values; the next one
+  // is dropped. The node restarts at the end of this handler anyway.
+  outputFrozen = true;
+  delay(50);
+
   if (server.hasArg("protocolMode"))  settings.protocolMode     = server.arg("protocolMode").toInt();
   if (server.hasArg("numledsoutput")) settings.numLedsPerOutput = server.arg("numledsoutput").toInt();
   if (server.hasArg("numoutput"))     settings.numOutputs       = server.arg("numoutput").toInt();
