@@ -30,7 +30,7 @@
 // Bump this with every release. It is shown on the OLED as the last stop of
 // the button menu and in the web interface. The build date comes from the
 // compiler, so it never needs editing by hand.
-#define FIRMWARE_VERSION      "1.1.0"
+#define FIRMWARE_VERSION      "1.1.1"
 #define FIRMWARE_BUILD_DATE   __DATE__
 
 // ─── LED configuration ────────────────────────────────────────────────────────
@@ -941,6 +941,47 @@ void loop() {
     }
   }
 #endif
+
+  // ── Activity indicator ───────────────────────────────────────────────────
+  // Steady green: link up, nothing arriving. While frames are reaching the
+  // strips, red is added on top of the green for a short amber flash twice
+  // a second, so the green never goes out. (Blue on top of green was too
+  // pale to see.)
+  // Watches the frame counter the LED task increments, so it reflects frames
+  // actually shown, not packets on the wire. Only in live DMX mode: the
+  // static, test and fade modes drive the status LED themselves, and the red
+  // blink for a lost link lives above.
+  if (!state.isAPMode && patch &&
+      !settings.randomFadeEnabled && !settings.enStatColor && !settings.ledCycleEnabled) {
+    const unsigned long FLASH_PERIOD_MS = 500;      // 2 Hz
+    const unsigned long FLASH_ON_MS     = 100;       // blue for this long each period
+// Green stays lit;
+    static int           lastFrames    = 0;
+    static unsigned long lastFrameSeen = 0;
+    static unsigned long periodStart   = 0;
+    static bool          showingBlue   = false;
+
+    unsigned long now    = millis();
+    int           frames = patch->nb_frames;
+    if (frames != lastFrames) { lastFrames = frames; lastFrameSeen = now; }
+
+    bool linkUp = (settings.networkMode == 1) ? (WiFi.status() == WL_CONNECTED)
+                                              : (ETH.localIP() != INADDR_NONE);
+    bool active = (now - lastFrameSeen) < 500UL;   // holds through a brief gap
+
+    if (linkUp && active) {
+      if (now - periodStart >= FLASH_PERIOD_MS) periodStart = now;
+      bool wantBlue = (now - periodStart) < FLASH_ON_MS;
+      if (wantBlue != showingBlue) {
+        showingBlue = wantBlue;
+        // Green stays lit; the flash adds red on top, which reads as amber.
+        setStatusLED(showingBlue ? 140 : 0, 255, 0);
+      }
+    } else if (linkUp && showingBlue) {
+      showingBlue = false;                          // back to steady green
+      setStatusLED(0, 255, 0);
+    }
+  }
 
   // ── LED output priority: randomFade > staticColor > ledCycle ─────────────
   if (settings.randomFadeEnabled) {

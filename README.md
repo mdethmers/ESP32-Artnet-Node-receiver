@@ -131,7 +131,7 @@ Important! Be sure that the Universes/outputs/leds always match what you output.
 
 ## Pin/Setting/Config info
 - Default led strip pins are 12, 14, 27, 26 (more outputs can be added if necessary. Change config accordingly).
-- Default status led is set to pin 16.
+- Default status led is set to pin 16. Yellow while booting, blinking red while waiting for a link, steady green when the link is up, green with a short amber flash twice a second while Art-Net or sACN frames are arriving, blue in AP mode.
 - SPI-based LED clock line can run from Pin 17. Never versions of the board have this pin connected in the connector. 
 - Level shifter OE is set to pin 25 and should be set LOW
 - Pin 16/17 can be reprogrammed for new functionality/adding more outputs. (They are connected to the 5v level shifter). 
