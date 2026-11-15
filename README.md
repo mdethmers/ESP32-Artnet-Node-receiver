@@ -28,6 +28,7 @@ Node & Resolume Arena configuration: https://www.youtube.com/watch?v=1a7sWZTA7lg
 - Reliable Performance: Boasts 99%+ reliability with less than 1% dropped frames.
 - 128x32 OLED Display Support: Provides real-time status updates and configuration feedback.
 - Status RGB LED: Indicates device status for easy debugging and monitoring.
+- Power and temperature monitoring (boards with the INA226 and NTC sensors): supply voltage, current, power, board temperature and an optional external temperature probe, live in the web interface.
 - **RGB Test Cycle**: Quickly test LED outputs with built-in cycling modes.
 - Fully Open-Source: Includes PCB design and BOM, allowing users to build their own cost-effective controllers.
 
@@ -138,6 +139,7 @@ Important! Be sure that the Universes/outputs/leds always match what you output.
 - Level shifter OE is set to pin 25 and should be set LOW
 - Pin 16/17 can be reprogrammed for new functionality/adding more outputs. (They are connected to the 5v level shifter). 
 - I2C pins for OLED are set to pins 21 and 22.
+- Boards with monitoring: the INA226 current sensor shares the OLED's I2C bus (its address is found automatically), the on-board 10k NTC is on pin 32 and the optional external 10k NTC on pin 35. The shunt value, NTC beta and divider layout are `#define`s at the top of the sketch (`INA226_SHUNT_OHMS`, `NTC_BETA`, `NTC_ON_HIGH_SIDE`). Boards without an INA226 show no Monitor panel.
 - The default timeout is set to 30 seconds.
 - There is a 5V switch Where the 12v regulator sits. Use this if you power the node with 5V instead of 12V! The esp and other logic will be powered from the 5v power supply instead of the 12v to 5v regulator.
 

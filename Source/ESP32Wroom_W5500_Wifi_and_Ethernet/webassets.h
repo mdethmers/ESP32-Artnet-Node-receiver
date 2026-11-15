@@ -7,7 +7,7 @@
 // not understand C++11 raw string literals — it reads the JavaScript inside
 // them as C++ and emits prototypes for it, which then fail to compile.
 
-#define ASSET_VER "3"
+#define ASSET_VER "4"
 
 // Colours follow the node's own signal language: amber is anything you can act
 // on (the status LED and a venue worklight are both amber), green is live,
@@ -150,6 +150,20 @@ input[type=range]{width:100%;height:24px;accent-color:var(--lit)}
 .tally{margin:14px 0 0;font:400 13px/1.55 var(--f-mono);color:var(--muted)}
 .tally b{color:var(--ink);font-weight:600}
 
+/* Live readings: the same boxed chip as an output group, one per quantity. */
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(112px,1fr));
+  gap:10px;padding:16px}
+.stat{min-width:0;padding:10px 12px;border:1px solid var(--line);border-radius:8px;
+  background:var(--sunk)}
+.stat b{display:block;margin-bottom:7px;color:var(--muted);
+  font:600 10px/1.2 var(--f-ui);letter-spacing:.11em;text-transform:uppercase}
+.stat span{font:600 19px/1.2 var(--f-mono);font-variant-numeric:tabular-nums}
+.stat small{margin-left:4px;color:var(--muted);font:500 12px/1 var(--f-ui)}
+.stat.hot{border-color:var(--warn)}
+.stat.hot span{color:var(--warn)}
+.stat.off span{color:var(--muted);font:500 13px/1.75 var(--f-ui)}
+.stat.off small{display:none}
+
 .nodes{margin:0;padding:0;list-style:none;max-height:238px;overflow-y:auto}
 .nodes li{display:flex;align-items:center;gap:10px;padding:11px 16px;
   border-bottom:1px solid var(--line)}
@@ -255,6 +269,23 @@ function refresh(){
       'The node did not answer. Check the connection and try again.'})
     .then(function(){b.classList.remove('busy')})}
 
+/* One tile: a number, a dash while there is no reading, or a word when the
+   sensor is simply not there. */
+function tile(id,v,dp,hot,none){
+  var e=$(id);if(!e)return;
+  var ok=typeof v==='number',t=ok?v.toFixed(dp):(none||'—');
+  if(ok&&parseFloat(t)===0)t=(0).toFixed(dp);
+  e.querySelector('span').textContent=t;
+  e.classList.toggle('off',!ok&&!!none);
+  e.classList.toggle('hot',ok&&hot!=null&&v>=hot)}
+function drawSensors(d){
+  tile('#stV',d.v,2);tile('#stA',d.a,2);tile('#stW',d.w,1);
+  tile('#stTi',d.ti,1,d.hot);tile('#stTe',d.te,1,d.hot,'Not fitted')}
+function pollSensors(){
+  if(D.hidden)return;
+  fetch('/sensors',{cache:'no-store'}).then(function(r){return r.json()})
+    .then(drawSensors).catch(function(){})}
+
 function chMode(){return $('#lt1').checked?0:pick('channelMode')}
 /* Fixtures per universe. Ungrouped a fixture is one LED, which is where the
    familiar 170 / 128 / 102 come from. */
@@ -355,6 +386,8 @@ D.addEventListener('DOMContentLoaded',function(){
      on load; the server-rendered list may be stale or empty until then. */
   var rb=$('#reload');
   if(rb){rb.innerHTML=ARROWS;rb.addEventListener('click',refresh);refresh()}
+
+  if($('#mon')){pollSensors();setInterval(pollSensors,2000)}
 
   var f=$('#cfg');
   if(f){

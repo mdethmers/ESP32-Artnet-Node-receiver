@@ -30,7 +30,7 @@
 // Bump this with every release. It is shown on the OLED as the last stop of
 // the button menu and in the web interface. The build date comes from the
 // compiler, so it never needs editing by hand.
-#define FIRMWARE_VERSION      "1.1.1"
+#define FIRMWARE_VERSION      "1.2.0"
 #define FIRMWARE_BUILD_DATE   __DATE__
 
 // ─── LED configuration ────────────────────────────────────────────────────────
@@ -55,6 +55,30 @@
 #define BOOT_BUTTON_PIN       0
 
 int ShifterPin = 25;
+
+// ─── Monitoring sensors (hardware revision with INA226 + NTCs) ────────────────
+// Two 10k NTC dividers and an INA226 on the OLED's I2C bus (SDA 21 / SCL 22).
+// Both NTC pins are on ADC1, so they keep working while Wi-Fi is up.
+// The INA226 doubles as the revision marker: a board without one has nothing
+// wired to the NTC pins either, so no INA226 means no monitoring at all rather
+// than made-up temperatures from floating inputs.
+#define NTC_INTERNAL_PIN      35        // on-board NTC
+#define NTC_EXTERNAL_PIN      32        // optional external NTC, may be unfitted
+#define NTC_NOMINAL_OHMS      10000.0f  // NTC resistance at 25 °C
+#define NTC_BETA              3950.0f   // from the NTC datasheet
+#define NTC_SERIES_OHMS       10000.0f  // the fixed resistor in each divider
+#define NTC_SUPPLY_MV         3300.0f   // what the dividers are fed from
+// 0: fixed resistor to 3V3, NTC to GND (pin voltage falls as it warms up).
+// 1: NTC to 3V3, fixed resistor to GND (pin voltage rises as it warms up).
+#define NTC_ON_HIGH_SIDE      0
+// Readings outside this window mean an open or shorted input, which is how an
+// unfitted external sensor shows up. The cold limit sits where the ADC runs
+// out of range against the 3V3 rail.
+#define NTC_MIN_C             -15.0f
+#define NTC_MAX_C             150.0f
+#define INA226_SHUNT_OHMS     0.002f    // current-sense resistor — match the board
+#define TEMP_WARN_C           70        // the web page marks temperatures above this
+#define SENSOR_SAMPLE_MS      500UL
 
 // ─── Libraries ────────────────────────────────────────────────────────────────
 #include <Preferences.h>
@@ -116,6 +140,9 @@ void handleOTAUpdateResponse();
 void handleStyle();
 void handleScript();
 void handleNodes();
+void handleSensors();
+void setupSensors();
+void sampleSensors();
 void registerRoutes();
 void ESP32_W5500_onEvent();
 void showLeds();
@@ -213,6 +240,22 @@ struct State {
   bool          displayBlink        = false;
 };
 
+// ─── Sensor readings ──────────────────────────────────────────────────────────
+// Written by sampleSensors() and read by the web handlers, both on the loop
+// task, so no locking is needed.
+struct SensorState {
+  bool    present    = false;   // an INA226 answered at boot
+  uint8_t inaAddr    = 0;
+  bool    powerValid = false;
+  float   volts      = 0;       // supply voltage at the INA226 bus pin
+  float   amps       = 0;
+  float   watts      = 0;
+  bool    intValid   = false;
+  bool    extValid   = false;
+  float   tempInt    = 0;       // °C
+  float   tempExt    = 0;       // °C
+};
+
 // ─── Colour-fade state ────────────────────────────────────────────────────────
 // Cycles sequentially: Red → Green → Blue → White1 (RGBW/WW) → White2 (RGBWW)
 // Each channel fades 0→255 then 255→0 before the next channel takes over.
@@ -266,8 +309,9 @@ uint8_t ledData[NUMSTRIPS * MAX_LEDS_RGB * 5]; // worst-case: 5 bytes per LED (R
 I2SAPA102 controller(0);
 CRGB      leds[NUMSTRIPS * MAX_LEDS_RGB];      // FastLED CRGB array for APA102
 
-Settings settings;
-State    state;
+Settings    settings;
+State       state;
+SensorState sensors;
 
 // Raised by the config handler before it writes a single setting. The Art-Net
 // LED task runs on the other core and reads settings on every frame; without
@@ -634,6 +678,121 @@ void randomFadeLEDs() {
   setAllLeds(ch[0], ch[1], ch[2], ch[3], ch[4]);
 }
 
+// ─── Monitoring sensors ───────────────────────────────────────────────────────
+// The INA226 is read register-by-register; nothing here needs a library. No
+// calibration register is programmed: current and power are worked out from
+// the raw shunt and bus voltages, so the shunt value lives in one #define.
+#define INA226_REG_CONFIG   0x00
+#define INA226_REG_SHUNT    0x01   // signed, 2.5 µV per bit
+#define INA226_REG_BUS      0x02   // 1.25 mV per bit
+#define INA226_REG_MFR_ID   0xFE   // reads 0x5449 ("TI")
+// 64 averages of 1.1 ms shunt + bus conversions, continuous: a fresh, quiet
+// reading about every 140 ms.
+#define INA226_CONFIG       0x4727
+
+static bool inaRead(uint8_t addr, uint8_t reg, uint16_t &value) {
+  Wire.beginTransmission(addr);
+  Wire.write(reg);
+  if (Wire.endTransmission() != 0) return false;
+  if (Wire.requestFrom(addr, (uint8_t)2) != 2) return false;
+  uint8_t hi = Wire.read();
+  uint8_t lo = Wire.read();
+  value = ((uint16_t)hi << 8) | lo;
+  return true;
+}
+
+static bool inaWrite(uint8_t addr, uint8_t reg, uint16_t value) {
+  Wire.beginTransmission(addr);
+  Wire.write(reg);
+  Wire.write((uint8_t)(value >> 8));
+  Wire.write((uint8_t)(value & 0xFF));
+  return Wire.endTransmission() == 0;
+}
+
+// Beta-equation conversion. Returns false for an open or shorted input.
+static bool readNtc(uint8_t pin, float &celsius) {
+  uint32_t sum = 0;
+  for (int i = 0; i < 8; i++) sum += analogReadMilliVolts(pin);
+  float mv = sum / 8.0f;
+  if (mv < 1.0f || mv > NTC_SUPPLY_MV - 1.0f) return false;
+
+#if NTC_ON_HIGH_SIDE
+  float ohms = NTC_SERIES_OHMS * (NTC_SUPPLY_MV - mv) / mv;
+#else
+  float ohms = NTC_SERIES_OHMS * mv / (NTC_SUPPLY_MV - mv);
+#endif
+  float kelvin = 1.0f / (1.0f / 298.15f + logf(ohms / NTC_NOMINAL_OHMS) / NTC_BETA);
+  celsius = kelvin - 273.15f;
+  return celsius > NTC_MIN_C && celsius < NTC_MAX_C;
+}
+
+// Light smoothing so the last digit on the page does not flicker. A sensor
+// that has just appeared starts from its first reading instead of ramping.
+static void updateTemp(uint8_t pin, bool &valid, float &value) {
+  float t;
+  if (!readNtc(pin, t)) { valid = false; return; }
+  value = valid ? value + 0.25f * (t - value) : t;
+  valid = true;
+}
+
+// Call after display.begin(): the INA226 shares the OLED's bus.
+void setupSensors() {
+  Wire.begin();   // already up if the OLED was found; needed if it was not
+
+  // The address is set by the A0/A1 straps, so look across the whole range.
+  for (uint8_t addr = 0x40; addr <= 0x4F; addr++) {
+    uint16_t id = 0;
+    if (inaRead(addr, INA226_REG_MFR_ID, id) && id == 0x5449) {
+      sensors.inaAddr = addr;
+      sensors.present = true;
+      break;
+    }
+  }
+  if (!sensors.present) {
+    Serial.println("No INA226 found — power and temperature monitoring off");
+    return;
+  }
+
+  inaWrite(sensors.inaAddr, INA226_REG_CONFIG, INA226_CONFIG);
+  analogSetPinAttenuation(NTC_INTERNAL_PIN, ADC_11db);
+  analogSetPinAttenuation(NTC_EXTERNAL_PIN, ADC_11db);
+  Serial.printf("INA226 at 0x%02X — power and temperature monitoring on\n", sensors.inaAddr);
+}
+
+// Called from loop(). A couple of short I2C reads and sixteen ADC samples,
+// twice a second; the Art-Net path runs on its own tasks and never waits on it.
+void sampleSensors() {
+  if (!sensors.present) return;
+  static unsigned long lastSample = 0;
+  if (millis() - lastSample < SENSOR_SAMPLE_MS) return;
+  lastSample = millis();
+
+  uint16_t rawShunt = 0, rawBus = 0;
+  if (inaRead(sensors.inaAddr, INA226_REG_SHUNT, rawShunt) &&
+      inaRead(sensors.inaAddr, INA226_REG_BUS,   rawBus)) {
+    sensors.volts      = rawBus * 0.00125f;
+    sensors.amps       = (int16_t)rawShunt * 2.5e-6f / INA226_SHUNT_OHMS;
+    sensors.watts      = sensors.volts * sensors.amps;
+    sensors.powerValid = true;
+  } else {
+    sensors.powerValid = false;
+  }
+
+  updateTemp(NTC_INTERNAL_PIN, sensors.intValid, sensors.tempInt);
+  updateTemp(NTC_EXTERNAL_PIN, sensors.extValid, sensors.tempExt);
+
+#if ARTNET_STATS
+  static unsigned long lastPrint = 0;
+  if (millis() - lastPrint >= 5000UL) {
+    lastPrint = millis();
+    Serial.printf("[sensors] %.2f V %.2f A %.1f W | int ", sensors.volts, sensors.amps, sensors.watts);
+    if (sensors.intValid) Serial.printf("%.1f C", sensors.tempInt); else Serial.print("--");
+    Serial.print(" ext ");
+    if (sensors.extValid) Serial.printf("%.1f C\n", sensors.tempExt); else Serial.println("--");
+  }
+#endif
+}
+
 // ─── Setup ────────────────────────────────────────────────────────────────────
 void setup() {
   Serial.begin(115200);
@@ -647,6 +806,7 @@ void setup() {
   if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
     Serial.println(F("SSD1306 allocation failed"));
   }
+  setupSensors();
 
   loadSettings();
 
@@ -858,6 +1018,7 @@ void loop() {
   }
 
   server.handleClient();
+  sampleSensors();
 
   if (!state.isAPMode) {
     static bool wasDisconnected   = true;
@@ -1471,7 +1632,26 @@ void handleNodes() {
   server.send(200, "application/json", out);
 }
 
+// Live readings for the Monitor panel. A value the node cannot read right now
+// goes out as null, which the page shows as a dash (or "Not fitted" for the
+// optional external sensor).
+void handleSensors() {
+  String out;
+  out.reserve(96);
+  out += F("{\"v\":");   out += sensors.powerValid ? String(sensors.volts, 2)   : String(F("null"));
+  out += F(",\"a\":");   out += sensors.powerValid ? String(sensors.amps, 2)    : String(F("null"));
+  out += F(",\"w\":");   out += sensors.powerValid ? String(sensors.watts, 1)   : String(F("null"));
+  out += F(",\"ti\":");  out += sensors.intValid   ? String(sensors.tempInt, 1) : String(F("null"));
+  out += F(",\"te\":");  out += sensors.extValid   ? String(sensors.tempExt, 1) : String(F("null"));
+  out += F(",\"hot\":"); out += String(TEMP_WARN_C);
+  out += '}';
+
+  server.sendHeader(F("Cache-Control"), F("no-store"));
+  server.send(200, "application/json", out);
+}
+
 void registerRoutes() {
+  server.on("/sensors",   HTTP_GET,  handleSensors);
   server.on("/",          HTTP_GET,  handleRoot);
   server.on("/config",    HTTP_POST, handleConfig);
   server.on("/update",    HTTP_GET,  handleOTAUpdate);
@@ -1561,7 +1741,7 @@ void handleRoot() {
   int       upo = getUniversesPerOutput();
 
   String c;
-  c.reserve(12000);
+  c.reserve(13000);
   pageHead(c, settings.nodeName);
 
   // ── Masthead: who am I, where am I, what am I speaking ────────────────────
@@ -1583,6 +1763,23 @@ void handleRoot() {
   c += F("</p></div>"
          "<button type='button' id='theme' class='icon lg' aria-label='Switch theme'></button>"
          "</header>");
+
+  // ── Monitor ───────────────────────────────────────────────────────────────
+  // Only on boards that carry the sensors. The tiles are filled in by app.js
+  // from /sensors, so the page itself never goes stale.
+  if (sensors.present) {
+    c += F("<section class='panel' id='mon'><div class='legend'>Monitor");
+    tipButton(c, F("Supply voltage, total current and power measured at the node's "
+                   "input, plus the board temperature. The external temperature probe "
+                   "is optional. Readings refresh every two seconds."));
+    c += F("</div><div class='stats'>"
+           "<div class='stat' id='stV'><b>Voltage</b><span>&mdash;</span><small>V</small></div>"
+           "<div class='stat' id='stA'><b>Current</b><span>&mdash;</span><small>A</small></div>"
+           "<div class='stat' id='stW'><b>Power</b><span>&mdash;</span><small>W</small></div>"
+           "<div class='stat' id='stTi'><b>Board temp</b><span>&mdash;</span><small>&deg;C</small></div>"
+           "<div class='stat' id='stTe'><b>External temp</b><span>&mdash;</span><small>&deg;C</small></div>"
+           "</div></section>");
+  }
 
   // ── Nodes on this network ─────────────────────────────────────────────────
   // Outside the form, so picking a node never posts anything.
