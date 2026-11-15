@@ -858,10 +858,7 @@ void setup() {
     controller.initled(leds, activePinsInt, APA102_CLOCK_PIN,
                        settings.numOutputs, settings.numLedsPerOutput);
     controller.setBrightness(settings.ledBrightness);
-    // Quick white flash to confirm wiring
-    fill_solid(leds, settings.numOutputs * settings.numLedsPerOutput, CRGB::White);
-    controller.showPixels();
-    delay(200);
+    // Blank the strip at startup so it stays dark until data arrives.
     fill_solid(leds, settings.numOutputs * settings.numLedsPerOutput, CRGB::Black);
     controller.showPixels();
 
