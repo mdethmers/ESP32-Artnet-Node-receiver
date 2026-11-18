@@ -30,7 +30,7 @@
 // Bump this with every release. It is shown on the OLED as the last stop of
 // the button menu and in the web interface. The build date comes from the
 // compiler, so it never needs editing by hand.
-#define FIRMWARE_VERSION      "1.3.0"
+#define FIRMWARE_VERSION      "1.4.0"
 #define FIRMWARE_BUILD_DATE   __DATE__
 
 // ─── LED configuration ────────────────────────────────────────────────────────
@@ -39,7 +39,7 @@
 // page, because a longer WS2812 strip takes longer to clock out — six universes
 // of RGB is 1020 pixels, about 32 frames a second against 49 at four.
 #define MAX_UNIVERSES_PER_OUTPUT     6
-#define DEFAULT_UNIVERSES_PER_OUTPUT 4
+#define DEFAULT_UNIVERSES_PER_OUTPUT 6
 #define MAX_LEDS_RGB          (170 * MAX_UNIVERSES_PER_OUTPUT)   // 1020  (3 ch)
 #define MAX_LEDS_RGBW         (128 * MAX_UNIVERSES_PER_OUTPUT)   //  768  (4 ch)
 #define MAX_LEDS_RGBWW        (102 * MAX_UNIVERSES_PER_OUTPUT)   //  612  (5 ch)  floor(512/5)
@@ -137,6 +137,12 @@ void loadSettings();
 void saveSettings();
 void handleRoot();
 void handleConfig();
+void handleLive();
+void saveLiveSettings();
+void applyBrightness();
+void enterLiveOutput();
+void drawHomeScreen();
+bool isLiveDmx();
 void resetToDefaultPins();
 void updateStripPins();
 void displayStatus(const String& line1, const String& line2 = "", const String& line3 = "", const String& line4 = "", bool showWiFiIcon = false);
@@ -196,7 +202,8 @@ struct Settings {
   // socket and a second parse of every frame — overhead a node earns only if
   // the console actually sends sACN.
   int     protocolMode       = PROTOCOL_ARTNET;  // 0=ArtNet, 1=sACN, 2=Both
-  // Rotate the OLED 180° for a node mounted upside-down. Applied once at boot.
+  // Rotate the OLED 180° for a node mounted upside-down. Applied at boot and
+  // again whenever the web page flips the switch.
   bool    screenRotation     = false;
 
   // Convenience helpers -------------------------------------------------------
@@ -327,6 +334,8 @@ SensorState sensors;
 // LED task runs on the other core and reads settings on every frame; without
 // this it can pick up a half-applied change (say a new strip type whose driver
 // only exists after the restart) and call into a driver that was never set up.
+// The live handler raises it too, briefly, while it hands the strips back to
+// the Art-Net task, and lowers it again when it is done.
 volatile bool outputFrozen = false;
 
 DiscoveredNode discoveredNodes[MAX_DISCOVERED_NODES];
@@ -523,7 +532,11 @@ void setAllLeds(uint8_t r, uint8_t g, uint8_t b, uint8_t w1, uint8_t w2) {
 // pointer advances by that stride and any unused tail of an output's last
 // universe is simply skipped.
 void displayfunction(void *param) {
-  if (outputFrozen) return;            // settings are being rewritten for a restart
+  if (outputFrozen) return;            // settings are being rewritten
+  // Static colour, RGB test and fade own the strips. The output mode can now
+  // change without a restart, so the frame is dropped here rather than left to
+  // fight the loop task over the drivers.
+  if (!isLiveDmx()) return;
 
   subArtnet *subartnet = (subArtnet *)param;
 
@@ -616,6 +629,12 @@ int getLedsPerUniverse() {
   // fixture is a single LED, which is why this reads as "LEDs per universe"
   // everywhere it is used.
   return UNIVERSE_SIZE_IN_CHANNEL / getChannelsPerLed();
+}
+
+// True while the strips follow incoming DMX, false while static colour, RGB
+// test or fade is showing.
+bool isLiveDmx() {
+  return !settings.randomFadeEnabled && !settings.enStatColor && !settings.ledCycleEnabled;
 }
 
 int getGroupSize() {
@@ -867,7 +886,7 @@ void setup() {
     for (int i = 0; i < NUMSTRIPS; i++) activePinsInt[i] = settings.pins[i];
     controller.initled(leds, activePinsInt, APA102_CLOCK_PIN,
                        settings.numOutputs, settings.numLedsPerOutput);
-    controller.setBrightness(settings.ledBrightness);
+    applyBrightness();
     // Blank the strip at startup so it stays dark until data arrives.
     fill_solid(leds, settings.numOutputs * settings.numLedsPerOutput, CRGB::Black);
     controller.showPixels();
@@ -885,7 +904,6 @@ void setup() {
         driver.initled((uint8_t*)ledData, activePins,
                        (uint8_t)NUMSTRIPS, (uint16_t)settings.numLedsPerOutput,
                        ORDER_RGBCCT);
-        driver.setBrightness(settings.ledBrightness);
         break;
 
       case CHANNEL_MODE_RGBW:
@@ -894,7 +912,6 @@ void setup() {
         driver.initled((uint8_t*)ledData, activePins,
                        (uint8_t)NUMSTRIPS, (uint16_t)settings.numLedsPerOutput,
                        ORDER_GRBW);
-        driver.setBrightness(settings.ledBrightness);
         break;
 
       default:
@@ -903,9 +920,9 @@ void setup() {
         driver.initled((uint8_t*)ledData, activePins,
                        (uint8_t)NUMSTRIPS, (uint16_t)settings.numLedsPerOutput,
                        ORDER_GRB);
-        driver.setBrightness(settings.ledBrightness);
         break;
     }
+    applyBrightness();
     // Clear the buffer after driver init — prevents stale bytes causing
     // a rogue full-white first LED when ArtNet data starts arriving.
     memset(ledData, 0, sizeof(ledData));
@@ -1047,11 +1064,7 @@ void loop() {
       } else {
         if (wasDisconnected || !lastConnectionState) {
           setStatusLED(0, 255, 0);
-          String ledsInfo = "LED:" + String(settings.numLedsPerOutput) +
-                            (getGroupSize() > 1 ? "/" + String(getGroupSize()) : "") +
-                            " Uni:" + String(getUniversesPerOutput()) +
-                            " Out:" + String(settings.numOutputs);
-          displayStatus(settings.nodeName, "WiFi: " + WiFi.localIP().toString(), ledsInfo, "", true);
+          drawHomeScreen();
           wasDisconnected = false;
         }
       }
@@ -1073,13 +1086,7 @@ void loop() {
       } else {
         if (wasDisconnected || !lastConnectionState) {
           setStatusLED(0, 255, 0);
-          String ipInfo = settings.useStaticIP ? "Static: " + settings.staticIP
-                                                : "DHCP: " + ETH.localIP().toString();
-          String ledsInfo = "LED:" + String(settings.numLedsPerOutput) +
-                            (getGroupSize() > 1 ? "/" + String(getGroupSize()) : "") +
-                            " Uni:" + String(getUniversesPerOutput()) +
-                            " Out:" + String(settings.numOutputs);
-          displayStatus(settings.nodeName, ipInfo, ledsInfo);
+          drawHomeScreen();
           wasDisconnected = false;
         }
       }
@@ -1265,8 +1272,112 @@ void saveSettings() {
   preferences.end();
 }
 
+// Only the settings the web page applies without a restart. Kept apart from
+// saveSettings() so dragging a slider rewrites a handful of keys, not all of
+// them.
+void saveLiveSettings() {
+  preferences.begin("esp32config", false);
+  preferences.putInt("ledbrightness",    settings.ledBrightness);
+  preferences.putString("staticColor",   settings.staticColor);
+  preferences.putBool("enStatColor",     settings.enStatColor);
+  preferences.putBool("ledCycleEnabled", settings.ledCycleEnabled);
+  preferences.putBool("randFadeEn",      settings.randomFadeEnabled);
+  preferences.putInt("whiteLevel",       settings.whiteLevel);
+  preferences.putInt("white2Level",      settings.white2Level);
+  preferences.putBool("screenRotation",  settings.screenRotation);
+  preferences.end();
+}
+
 void resetToDefaultPins() {
   for (int i = 0; i < NUMSTRIPS; i++) settings.pins[i] = DEFAULT_PINS[i];
+}
+
+// ─── Live settings ────────────────────────────────────────────────────────────
+// The brightness ceiling reaches the strips three ways: the WS2812 driver and
+// the APA102 driver each scale on the way out, and the NeoPixel objects behind
+// static colour and the test patterns scale as pixels are set. All three are
+// set together so every output mode obeys the same ceiling.
+void applyBrightness() {
+  int b = settings.ledBrightness;
+  if (b < 0)   b = 0;
+  if (b > 255) b = 255;
+
+  if (settings.ledType == LED_TYPE_APA102) {
+    // Done here rather than through I2SAPA102::setBrightness(). That splits
+    // the value into the pixel's 5-bit global level (brightness / 8) and a
+    // colour scale of 31 * brightness / level, held in a uint8_t. The scale
+    // passes 255 for most values that are not a multiple of 8 and wraps to
+    // almost nothing, so the strip dropped to near black at every few steps
+    // of the slider, and under 8 the division is by zero.
+    // Rounding the global level up instead keeps the scale at or below 255,
+    // and the two together land on the brightness asked for.
+    int level = (b * 31 + 254) / 255;                 // 0..31, 0 only at b == 0
+    int scale = level ? (b * 31) / level : 0;         // 0..255
+    controller.fillbuffer((uint16_t*)controller.dmaBuffers[0]->buffer, (uint8_t)level);
+    controller.fillbuffer((uint16_t*)controller.dmaBuffers[1]->buffer, (uint8_t)level);
+    for (int i = 0; i < 256; i++) {
+      uint8_t v = (uint8_t)((i * scale) / 255);
+      controller.red_map[i] = controller.green_map[i] = controller.blue_map[i] = v;
+    }
+  } else {
+    driver.setBrightness((uint8_t)b);
+  }
+  for (int i = 0; i < NUMSTRIPS; i++) strips[i].setBrightness((uint8_t)b);
+}
+
+// Lets a frame that is still being clocked out finish before the strips change
+// hands. Bounded, so a driver that never reports idle cannot hang the page.
+static void waitForOutputIdle() {
+  delay(5);                                  // a frame already past its checks
+  if (settings.ledType == LED_TYPE_APA102) { delay(20); return; }
+  unsigned long t0 = millis();
+  while (driver.isDisplaying && millis() - t0 < 150) delay(1);
+}
+
+// Hands the strips back to the Art-Net task after static colour, RGB test or
+// fade. On WS2812 RGB and RGBW those modes write through the NeoPixel objects,
+// which take the data pins away from the I2S driver; until now only a restart
+// gave them back. Leaves the strips dark until the next frame arrives, the
+// same as after boot.
+void enterLiveOutput() {
+  outputFrozen = true;
+  waitForOutputIdle();
+
+  if (settings.ledType == LED_TYPE_APA102) {
+    fill_solid(leds, settings.numOutputs * settings.numLedsPerOutput, CRGB::Black);
+    controller.showPixels();
+  } else {
+    uint8_t activePins[NUMSTRIPS];
+    for (int i = 0; i < NUMSTRIPS; i++) activePins[i] = (uint8_t)settings.pins[i];
+    driver.setPins(activePins);
+    memset(ledData, 0, sizeof(ledData));
+    driver.showPixels(WAIT, ledData);
+  }
+
+  outputFrozen = false;
+}
+
+// The resting OLED screen for the current link: who the node is and where.
+void drawHomeScreen() {
+  if (state.isAPMode) {
+    displayStatus("AP Mode", settings.nodeName, "IP:" + WiFi.softAPIP().toString());
+    return;
+  }
+
+  String ledsInfo = "LED:" + String(settings.numLedsPerOutput) +
+                    (getGroupSize() > 1 ? "/" + String(getGroupSize()) : "") +
+                    " Uni:" + String(getUniversesPerOutput()) +
+                    " Out:" + String(settings.numOutputs);
+
+  if (settings.networkMode == 1) {
+    if (WiFi.status() != WL_CONNECTED) { displayStatus("Waiting for Wi-Fi"); return; }
+    displayStatus(settings.nodeName, "WiFi: " + WiFi.localIP().toString(), ledsInfo, "", true);
+  } else {
+    if (ETH.localIP() == INADDR_NONE) { displayStatus("Waiting for Ethernet"); return; }
+    String ipInfo = settings.useStaticIP ? "Static: " + settings.staticIP
+                                          : "DHCP: " + ETH.localIP().toString();
+    displayStatus(settings.nodeName, ipInfo, ledsInfo);
+  }
 }
 
 // ─── OLED helpers ─────────────────────────────────────────────────────────────
@@ -1325,14 +1436,16 @@ void cycleLEDs() {
   if (millis() - state.lastUpdate < CYCLE_DELAY) return;
   state.lastUpdate = millis();
 
+  // Full scale here: the brightness ceiling is applied on the way out (see
+  // applyBrightness), so scaling the value as well would apply it twice.
   int channels = getChannelsPerLed();
   uint8_t r = 0, g = 0, b = 0, w1 = 0, w2 = 0;
   switch (state.currentColor) {
-    case 0: r  = settings.ledBrightness; break;
-    case 1: g  = settings.ledBrightness; break;
-    case 2: b  = settings.ledBrightness; break;
-    case 3: if (channels >= 4) w1 = settings.ledBrightness; break;
-    case 4: if (channels >= 5) w2 = settings.ledBrightness; break;
+    case 0: r  = 255; break;
+    case 1: g  = 255; break;
+    case 2: b  = 255; break;
+    case 3: if (channels >= 4) w1 = 255; break;
+    case 4: if (channels >= 5) w2 = 255; break;
   }
   state.currentColor = (state.currentColor + 1) % channels;
   setAllLeds(r, g, b, w1, w2);
@@ -1661,6 +1774,7 @@ void registerRoutes() {
   server.on("/sensors",   HTTP_GET,  handleSensors);
   server.on("/",          HTTP_GET,  handleRoot);
   server.on("/config",    HTTP_POST, handleConfig);
+  server.on("/live",      HTTP_POST, handleLive);
   server.on("/update",    HTTP_GET,  handleOTAUpdate);
   server.on("/doUpdate",  HTTP_POST, handleOTAUpdateResponse, handleDoUpdate);
   server.on("/style.css", HTTP_GET,  handleStyle);
@@ -2012,8 +2126,7 @@ void handleRoot() {
   rowEnd(c);
 
   rowStart(c, F("Flip the display"),
-           F("Turns the OLED through 180° for a node that is mounted upside-down. "
-             "Takes effect after the restart that follows saving."),
+           F("Turns the OLED through 180° for a node that is mounted upside-down."),
            "screenRotation");
   toggleSwitch(c, "screenRotation", "screenRotation", settings.screenRotation);
   rowEnd(c);
@@ -2046,7 +2159,7 @@ void handleRoot() {
               : settings.enStatColor       ? 1 : 0;
 
   c += F("<section class='panel'><div class='legend'>Output</div>");
-  rowStart(c, F("What the strips show"),
+  rowStart(c, F("Mode"),
            F("Static colour, RGB test and fade all override incoming DMX. "
              "Set Live DMX when the rig is running."));
   c += F("<div class='seg'>");
@@ -2080,8 +2193,10 @@ void handleRoot() {
   rowEnd(c);
   c += F("</section>");
 
-  c += F("<div class='dock'><p class='note'>Saving restarts the node. Outputs go dark "
-         "for a few seconds.</p>"
+  // The page script hides this until a setting that needs a restart has been
+  // changed. Settings tagged Live are sent to /live as they are touched.
+  c += F("<div class='dock' id='dock'><p class='note'>These changes need a restart. "
+         "Outputs go dark for a few seconds.</p>"
          "<input type='submit' id='save' class='btn go' value='Save &amp; restart'></div>"
          "</form>");
 
@@ -2091,6 +2206,97 @@ void handleRoot() {
 
   c += F("</div><script src='/app.js?v=" ASSET_VER "' defer></script></body></html>");
   server.send(200, "text/html", c);
+}
+
+// ─── Live settings handler ────────────────────────────────────────────────────
+// Output mode, brightness ceiling, static colour and its white levels, and the
+// display flip are applied here straight away, without the restart that
+// /config ends in. The page posts while a control is being dragged and adds
+// save=1 once it is let go, so NVS is written once per change, not per step.
+// Runs on the loop task, the same one that drives static colour and the test
+// patterns; only the Art-Net LED task is concurrent.
+static bool isHexColor(const String& s) {
+  if (s.length() != 7 || s[0] != '#') return false;
+  for (int i = 1; i < 7; i++) if (!isxdigit((unsigned char)s[i])) return false;
+  return true;
+}
+
+static int levelArg(const char* name, int current) {
+  if (!server.hasArg(name)) return current;
+  int v = server.arg(name).toInt();
+  return v < 0 ? 0 : (v > 255 ? 255 : v);
+}
+
+void handleLive() {
+  const bool wasLive = isLiveDmx();
+  bool modeChanged = false, colorChanged = false, brightChanged = false, rotChanged = false;
+
+  if (server.hasArg("outputMode")) {
+    int  m      = server.arg("outputMode").toInt();
+    bool stat   = (m == 1), cycle = (m == 2), fade = (m == 3);
+    if (stat  != settings.enStatColor || cycle != settings.ledCycleEnabled ||
+        fade  != settings.randomFadeEnabled) {
+      settings.enStatColor       = stat;
+      settings.ledCycleEnabled   = cycle;
+      settings.randomFadeEnabled = fade;
+      modeChanged = true;
+    }
+  }
+
+  int brightness = levelArg("ledbrightness", settings.ledBrightness);
+  if (brightness != settings.ledBrightness) { settings.ledBrightness = brightness; brightChanged = true; }
+
+  if (server.hasArg("staticColor")) {
+    String col = server.arg("staticColor");
+    if (isHexColor(col) && col != settings.staticColor) { settings.staticColor = col; colorChanged = true; }
+  }
+  int w1 = levelArg("whiteLevel",  settings.whiteLevel);
+  int w2 = levelArg("white2Level", settings.white2Level);
+  if (w1 != settings.whiteLevel)  { settings.whiteLevel  = w1; colorChanged = true; }
+  if (w2 != settings.white2Level) { settings.white2Level = w2; colorChanged = true; }
+
+  if (server.hasArg("screenRotation")) {
+    bool rot = (server.arg("screenRotation").toInt() != 0);
+    if (rot != settings.screenRotation) { settings.screenRotation = rot; rotChanged = true; }
+  }
+
+  if (brightChanged) {
+    if (settings.ledType == LED_TYPE_APA102) {
+      // That driver rewrites its output buffers to change brightness, so keep
+      // the Art-Net task out while it does.
+      outputFrozen = true;
+      waitForOutputIdle();
+      applyBrightness();
+      outputFrozen = false;
+    } else {
+      applyBrightness();
+    }
+  }
+
+  if (modeChanged) {
+    fadeState.initialised = false;
+    state.currentColor    = 0;
+    // Static colour and fade paint the status LED themselves; start the
+    // others from the resting colour.
+    if (state.isAPMode) setStatusLED(0, 0, 255); else setStatusLED(0, 255, 0);
+
+    const bool nowLive = isLiveDmx();
+    if (!wasLive && nowLive)      enterLiveOutput();
+    else if (wasLive && !nowLive) waitForOutputIdle();   // let the last DMX frame finish
+  }
+
+  // The loop repaints a static colour on its next pass when this is cleared.
+  if (modeChanged || colorChanged || brightChanged) state.isStaticColorSet = false;
+
+  if (rotChanged) {
+    display.setRotation(settings.screenRotation ? 2 : 0);
+    drawHomeScreen();
+  }
+
+  if (server.hasArg("save")) saveLiveSettings();
+
+  server.sendHeader(F("Cache-Control"), F("no-store"));
+  server.send(200, "application/json", F("{\"ok\":true}"));
 }
 
 // ─── Config POST handler ──────────────────────────────────────────────────────

@@ -7,7 +7,7 @@
 // not understand C++11 raw string literals — it reads the JavaScript inside
 // them as C++ and emits prototypes for it, which then fail to compile.
 
-#define ASSET_VER "5"
+#define ASSET_VER "6"
 
 // Colours follow the node's own signal language: amber is anything you can act
 // on (the status LED and a venue worklight are both amber), green is live,
@@ -175,6 +175,10 @@ input[type=range]{width:100%;height:24px;accent-color:var(--lit)}
 .here{background:var(--sunk)}
 .tag{flex:none;padding:4px 7px;border:1px solid currentColor;border-radius:99px;
   color:var(--accent);font:600 9.5px/1 var(--f-ui);letter-spacing:.11em;text-transform:uppercase}
+/* Marks a setting that is sent to the node as it is touched. Green while the
+   node is taking the changes, red when the last one did not get through. */
+.tag.live{color:var(--live)}
+.tag.live.bad{color:var(--warn)}
 
 .icon{display:grid;place-items:center;flex:none;width:30px;height:30px;padding:0;
   border:1px solid var(--line);border-radius:7px;background:var(--panel);
@@ -375,6 +379,43 @@ function syncAll(){
   $('#w1Val').value=$('#whiteLevel').value;
   $('#w2Val').value=$('#white2Level').value}
 
+/* Settings the node applies without a restart. Everything else in the form
+   waits for Save & restart. */
+var LIVE={outputMode:1,ledbrightness:1,staticColor:1,whiteLevel:1,white2Level:1,screenRotation:1};
+
+/* Every restart-only value in the form as one string. Compared against the
+   copy taken at load to decide whether the save dock has anything to save. */
+function snap(f){
+  var s='';
+  for(var i=0;i<f.elements.length;i++){var e=f.elements[i];
+    if(!e.name||LIVE[e.name])continue;
+    if(e.type==='radio'){if(e.checked)s+=e.name+'='+e.value+'&'}
+    else if(e.type==='checkbox')s+=e.name+'='+(e.checked?1:0)+'&';
+    else s+=e.name+'='+e.value+'&'}
+  return s}
+
+function liveState(ok){
+  $$('.tag.live').forEach(function(t){
+    t.classList.toggle('bad',!ok);t.textContent=ok?'Live':'Not sent'})}
+/* One request at a time. A change made while one is in flight is sent as soon
+   as it returns, with whatever the controls say by then, so dragging a slider
+   never queues up a backlog on the node. queued: 1 = send, 2 = send and save. */
+var busy=false,queued=0;
+function sendLive(save){
+  if(busy){queued=Math.max(queued,save?2:1);return}
+  busy=true;
+  var body='outputMode='+pick('outputMode')+
+    '&ledbrightness='+$('#ledbrightness').value+
+    '&staticColor='+encodeURIComponent($('#staticColor').value)+
+    '&whiteLevel='+$('#whiteLevel').value+
+    '&white2Level='+$('#white2Level').value+
+    '&screenRotation='+($('#screenRotation').checked?1:0)+(save?'&save=1':'');
+  fetch('/live',{method:'POST',body:body,
+    headers:{'Content-Type':'application/x-www-form-urlencoded'}})
+    .then(function(r){liveState(r.ok)},function(){liveState(false)})
+    .then(function(){busy=false;
+      if(queued){var q=queued;queued=0;sendLive(q===2)}})}
+
 /* The field shows what the console shows; the form posts the raw 0-based value. */
 function fromField(){
   var v=parseInt($('#uniStart').value,10);if(isNaN(v))return;
@@ -401,13 +442,27 @@ D.addEventListener('DOMContentLoaded',function(){
 
   var f=$('#cfg');
   if(f){
+    /* The save dock stays out of the way until a setting that needs a restart
+       differs from what the node has. Live settings go out on their own:
+       while a control is being dragged the node follows it, and letting go
+       (the change event) also stores the value on the node. */
+    var dock=$('#dock'),base='';
+    function dirty(){if(dock)dock.hidden=snap(f)===base}
     f.addEventListener('input',function(e){
-      if(e.target.id==='uniStart')fromField();else syncAll()});
+      if(e.target.id==='uniStart')fromField();else syncAll();
+      if(LIVE[e.target.name])sendLive(false);else dirty()});
     f.addEventListener('change',function(e){
-      if(e.target.name==='protocolMode')toField();else syncAll()});
+      if(e.target.name==='protocolMode')toField();else syncAll();
+      if(LIVE[e.target.name])sendLive(true);else dirty()});
     f.addEventListener('submit',function(){
       var b=$('#save');if(b){b.disabled=true;b.value='Saving…'}});
-    syncAll()}
+    syncAll();
+    base=snap(f);dirty();
+    Object.keys(LIVE).forEach(function(n){
+      var e=f.elements[n];if(e&&!e.name)e=e[0];
+      var l=e&&e.closest('.row');l=l&&l.querySelector('.lbl');
+      if(l&&!l.querySelector('.tag'))
+        l.insertAdjacentHTML('beforeend','<span class="tag live">Live</span>')})}
 
   var pw=$('#pwshow');
   if(pw)pw.addEventListener('click',function(){
