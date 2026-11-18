@@ -30,7 +30,7 @@
 // Bump this with every release. It is shown on the OLED as the last stop of
 // the button menu and in the web interface. The build date comes from the
 // compiler, so it never needs editing by hand.
-#define FIRMWARE_VERSION      "1.4.0"
+#define FIRMWARE_VERSION      "1.4.1"
 #define FIRMWARE_BUILD_DATE   __DATE__
 
 // ─── LED configuration ────────────────────────────────────────────────────────
@@ -2052,7 +2052,7 @@ void handleRoot() {
   rowStart(c, F("Universes per output"),
            F("One universe carries 170 fixtures in RGB, 128 in RGBW or 102 in RGBWW. "
              "Outputs always begin on a universe boundary, so this is set in whole "
-             "universes. Four is the default; up to six are available. Longer "
+             "universes. Six is the default and the most an output takes. Longer "
              "strips refresh more slowly: six universes of WS2812 run at about "
              "32 frames a second, four at about 49."),
            "uniSlider");
