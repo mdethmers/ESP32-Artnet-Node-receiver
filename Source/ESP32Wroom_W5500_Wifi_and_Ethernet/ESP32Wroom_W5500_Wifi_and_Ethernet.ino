@@ -30,17 +30,26 @@
 // Bump this with every release. It is shown on the OLED as the last stop of
 // the button menu and in the web interface. The build date comes from the
 // compiler, so it never needs editing by hand.
-#define FIRMWARE_VERSION      "1.2.0"
+#define FIRMWARE_VERSION      "1.3.0"
 #define FIRMWARE_BUILD_DATE   __DATE__
 
 // ─── LED configuration ────────────────────────────────────────────────────────
-#define MAX_LEDS_RGB          680   // 170 LEDs × 4 universes  (3 ch)
-#define MAX_LEDS_RGBW         512   // 128 LEDs × 4 universes  (4 ch)
-#define MAX_LEDS_RGBWW        408   // 102 LEDs × 4 universes  (5 ch)  floor(512/5)*4
-#define NUM_LEDS_PER_STRIP    680
+// An output can listen on up to MAX_UNIVERSES_PER_OUTPUT universes. A fresh
+// node starts at DEFAULT_UNIVERSES_PER_OUTPUT; the rest is opt-in on the config
+// page, because a longer WS2812 strip takes longer to clock out — six universes
+// of RGB is 1020 pixels, about 32 frames a second against 49 at four.
+#define MAX_UNIVERSES_PER_OUTPUT     6
+#define DEFAULT_UNIVERSES_PER_OUTPUT 4
+#define MAX_LEDS_RGB          (170 * MAX_UNIVERSES_PER_OUTPUT)   // 1020  (3 ch)
+#define MAX_LEDS_RGBW         (128 * MAX_UNIVERSES_PER_OUTPUT)   //  768  (4 ch)
+#define MAX_LEDS_RGBWW        (102 * MAX_UNIVERSES_PER_OUTPUT)   //  612  (5 ch)  floor(512/5)
+#define NUM_LEDS_PER_STRIP    MAX_LEDS_RGB
 #define NUMSTRIPS             4
 #define UNIVERSE_SIZE_IN_CHANNEL 512
-#define MAX_GROUP_SIZE        16    // largest number of LEDs one fixture may drive
+// No channel mode puts more than a full universe of bytes on the wire per
+// universe, so this covers the longest strip in every mode (RGBW fills it).
+#define MAX_BYTES_PER_STRIP   (UNIVERSE_SIZE_IN_CHANNEL * MAX_UNIVERSES_PER_OUTPUT)
+#define MAX_GROUP_SIZE       16    // largest number of LEDs one fixture may drive
 #define COLOR_GRB
 
 // APA102 clock pin — MUST be > 16 on ESP32
@@ -155,7 +164,7 @@ int  getUniversesPerOutput();
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
 struct Settings {
-  int     numLedsPerOutput  = 680;
+  int     numLedsPerOutput  = 170 * DEFAULT_UNIVERSES_PER_OUTPUT;   // RGB default
   int     numOutputs        = 4;
   int     startUniverse     = 0;
   int     pins[NUMSTRIPS]   = {12, 14, 27, 26};
@@ -290,9 +299,10 @@ artnetESP32V2      artnet = artnetESP32V2();
 subArtnet         *patch  = nullptr;     // the one patch this node listens on
 
 // WS2812 driver + raw byte buffer
-// MAX_LEDS_RGB is the largest possible count (RGB mode), so size the buffer for that.
+// Sized in bytes rather than LEDs: the LED ceiling drops as the channel count
+// rises, so the longest strip is never more than MAX_BYTES_PER_STRIP.
 I2SClocklessLedDriver driver;
-uint8_t ledData[NUMSTRIPS * MAX_LEDS_RGB * 5]; // worst-case: 5 bytes per LED (RGBWW)
+uint8_t ledData[NUMSTRIPS * MAX_BYTES_PER_STRIP];
 
 // The Art-Net callback always shows with WAIT, never NO_WAIT. The driver's
 // NO_WAIT path waits for a running transfer with a timeout it sizes at the
@@ -631,7 +641,7 @@ int getUniversesPerOutput() {
   int per = getLedsPerUniverse();
   int u   = (getFixturesPerOutput() + per - 1) / per;
   if (u < 1) u = 1;
-  if (u > 4) u = 4;
+  if (u > MAX_UNIVERSES_PER_OUTPUT) u = MAX_UNIVERSES_PER_OUTPUT;
   return u;
 }
 
@@ -1928,9 +1938,12 @@ void handleRoot() {
   rowStart(c, F("Universes per output"),
            F("One universe carries 170 fixtures in RGB, 128 in RGBW or 102 in RGBWW. "
              "Outputs always begin on a universe boundary, so this is set in whole "
-             "universes."),
+             "universes. Four is the default; up to six are available. Longer "
+             "strips refresh more slowly: six universes of WS2812 run at about "
+             "32 frames a second, four at about 49."),
            "uniSlider");
-  slider(c, nullptr, "uniSlider", 1, 4, upo, "uniVal", String(), true);
+  slider(c, nullptr, "uniSlider", 1, MAX_UNIVERSES_PER_OUTPUT, upo, "uniVal", String(), true);
+  c += F("<p class='hint' id='upoHint'></p>");
   c += F("<input type='hidden' id='numledsoutput' name='numledsoutput' value='");
   c += String(settings.numLedsPerOutput);
   c += F("'>");

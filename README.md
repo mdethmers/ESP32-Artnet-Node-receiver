@@ -15,7 +15,7 @@ Node & Resolume Arena configuration: https://www.youtube.com/watch?v=1a7sWZTA7lg
 
 ## Features
 
-- 4 Outputs, 16 Universes in Total: Supports up to 4 LED strips with 4 universes per output, enabling large-scale LED installations.
+- 4 Outputs, up to 24 Universes in Total: Supports up to 4 LED strips with up to 6 universes per output (4 by default, raise it in the web interface), enabling large-scale LED installations. Longer strips refresh more slowly: 6 universes of WS2812 RGB (1020 LEDs) run at about 32 fps, 4 universes (680 LEDs) at about 49 fps.
 - Supports 3 (RGB), 4 (RGBW), and 5 (RGBAW) color order LEDs.
 - Supports 3-wire LEDs (WS28xx) and 4-wire  SPI clock-based LEDs (APA102).
 - Ethernet and Wi-Fi Support: Supports both wired and wireless Art-Net control for flexible connectivity.
@@ -163,7 +163,7 @@ To get you up and running with your node, I provide a basic setup example for Re
 4. In Resolume, set the correct network adapter in Preferences>DMX.
 5. In Resolume's advanced output, add a new Lumiverse and add the LED strips.
 6. In Resolume's advanced output, set the IP address.
-7. The node supports 4 universes (680 LEDS) per output. If you need all 16 universes (680 leds per output), add 4 Lumiverse outputs and set the right universes per output. For output 1 that is start universe 0, For output 2 that is start universe 4, For output 3 that is start universe 8, For output 4 that is start universe 12. Change this to the number of universes per output that you need.
+7. The node defaults to 4 universes (680 LEDS) per output and can be raised to 6 (1020 LEDS) in the web interface; the start universes then step by 6 instead of 4 (0, 6, 12, 18). If you need all 16 universes at the default (680 leds per output), add 4 Lumiverse outputs and set the right universes per output. For output 1 that is start universe 0, For output 2 that is start universe 4, For output 3 that is start universe 8, For output 4 that is start universe 12. Change this to the number of universes per output that you need.
 8. Your strips should now light up!
 
 ## Open-Source Contributions

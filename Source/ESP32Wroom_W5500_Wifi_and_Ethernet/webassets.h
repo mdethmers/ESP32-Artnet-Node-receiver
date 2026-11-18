@@ -7,7 +7,7 @@
 // not understand C++11 raw string literals — it reads the JavaScript inside
 // them as C++ and emits prototypes for it, which then fail to compile.
 
-#define ASSET_VER "4"
+#define ASSET_VER "5"
 
 // Colours follow the node's own signal language: amber is anything you can act
 // on (the status LED and a venue worklight are both amber), green is live,
@@ -302,26 +302,36 @@ function syncAll(){
   if(apa)$('#cm0').checked=true;
 
   /* Grouping multiplies how many LEDs a universe of fixtures can drive, so the
-     universe slider's range shrinks as the group grows — four universes of
+     universe slider's range shrinks as the group grows — six universes of
      quadrupled pixels would run past the strip length the drivers are built
-     for. The pixel ceiling is four universes' worth, whatever the mode. */
+     for. The pixel ceiling is six universes' worth, whatever the mode
+     (MAX_UNIVERSES_PER_OUTPUT on the node). */
+  var MAXU=6;
   var grp=Math.min(16,Math.max(1,+$('#grpSlider').value||1));
-  var maxU=Math.max(1,Math.floor(4/grp));
+  var maxU=Math.max(1,Math.floor(MAXU/grp));
   var us=$('#uniSlider');
   us.max=maxU;
   var upo=Math.min(maxU,Math.max(1,+us.value));
 
   /* Mirrors getFixturesPerOutput() / getUniversesPerOutput() on the node, so the
      map on screen is the patch the node will actually listen on. */
-  var leds=Math.min(4*per,upo*per*grp);
+  var leds=Math.min(MAXU*per,upo*per*grp);
   var fix=Math.ceil(leds/grp);
-  upo=Math.max(1,Math.min(4,Math.ceil(fix/per)));
+  upo=Math.max(1,Math.min(MAXU,Math.ceil(fix/per)));
   us.value=upo;
+  /* A WS2812 pixel takes 30 µs to clock out, so strip length sets the frame
+     rate. Only worth saying once the strip is longer than the default four
+     universes; APA102 is clocked far faster and is not affected. */
+  var fps=Math.floor(1e6/(leds*(cm===2?50:cm===1?40:30)+300));
+  var uh=$('#upoHint');
+  uh.textContent=(!apa&&leds>4*per)
+    ?leds+' pixels per output refresh at about '+fps+' frames a second.':'';
+  show('#upoHint',!!uh.textContent);
 
   /* Widest label in the map decides the chip type size, so a start universe of
      1000 stays readable in a four-across group instead of being cut off. */
   var digits=String(base+outs*upo-1).length;
-  var size=upo<3?12.5:(digits>3?10.5:(upo>3?11.5:12));
+  var size=upo<3?12.5:(upo>4?(digits>2?9:10):(digits>3?10.5:(upo>3?11.5:12)));
   var h='';
   for(var o=0;o<outs;o++){var u='';
     for(var i=0;i<upo;i++)u+='<span class="u">U'+(base+o*upo+i)+'</span>';
