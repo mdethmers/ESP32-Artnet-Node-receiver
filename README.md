@@ -127,6 +127,21 @@ The W5500 does not support Auto-MDI/MDIX, so you need a crossover cable to conne
 
 [`Bin/ESP32Wroom_W5500_Wifi_and_Ethernet.ino.bin`](Bin/ESP32Wroom_W5500_Wifi_and_Ethernet.ino.bin) is firmware 1.4.1 for the W5500 board. On a node that already runs this firmware, upload it through the web page (see [OTA updates](#ota-updates)).
 
+For a new or erased ESP32, flash all four files in [`Bin`](Bin) over USB with [esptool](https://github.com/espressif/esptool) (`pip install esptool`). Run this from the `Bin` folder and replace `COM5` with your serial port:
+
+```
+python -m esptool --chip esp32 --port COM5 --baud 921600 write-flash -z --flash-mode dio --flash-freq 80m --flash-size 4MB 0x1000 ESP32Wroom_W5500_Wifi_and_Ethernet.ino.bootloader.bin 0x8000 ESP32Wroom_W5500_Wifi_and_Ethernet.ino.partitions.bin 0xe000 boot_app0.bin 0x10000 ESP32Wroom_W5500_Wifi_and_Ethernet.ino.bin
+```
+
+| Address | File | What it is |
+| --- | --- | --- |
+| `0x1000` | `ESP32Wroom_W5500_Wifi_and_Ethernet.ino.bootloader.bin` | Bootloader |
+| `0x8000` | `ESP32Wroom_W5500_Wifi_and_Ethernet.ino.partitions.bin` | Partition table |
+| `0xe000` | `boot_app0.bin` | OTA data, selects the first app slot |
+| `0x10000` | `ESP32Wroom_W5500_Wifi_and_Ethernet.ino.bin` | Firmware |
+
+If esptool cannot connect, hold the BOOT button while it starts. Saved settings survive a reflash; run `python -m esptool --chip esp32 --port COM5 erase-flash` first for a clean start.
+
 ### Build it yourself
 
 The sketch is in [`Source/ESP32Wroom_W5500_Wifi_and_Ethernet`](Source/ESP32Wroom_W5500_Wifi_and_Ethernet).
